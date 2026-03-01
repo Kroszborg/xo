@@ -1,0 +1,10 @@
+# Build artifacts
+/xo
+
+# Go test cache
+*.test
+*.out
+
+# Editor / OS artefacts
+.DS_Store
+*.swp
