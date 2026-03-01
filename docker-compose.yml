@@ -1,0 +1,38 @@
+services:
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: xo
+      POSTGRES_PASSWORD: xo
+      POSTGRES_DB: xo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Apply the schema automatically on first start.
+      - ./pkg/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xo -d xo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── xo service ───────────────────────────────────────────────────────────────
+  xo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://xo:xo@postgres:5432/xo?sslmode=disable
+      # Set TASK_ID to a valid UUID at runtime to start a priority flow,
+      # e.g.:  docker compose run --rm -e TASK_ID=<uuid> xo
+      TASK_ID: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

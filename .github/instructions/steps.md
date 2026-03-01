@@ -33,6 +33,8 @@ Completed:
 - Timeout fallback
 - Acceptance stop mechanism
 - DB-to-DTO converters
+- Proper error handling in converters
+- cmd/xo main entry point with graceful shutdown
 
 Current Status:
 
@@ -48,7 +50,8 @@ Not yet implemented:
 - Crash-safe timeout recovery
 - Event-driven architecture
 - Redis candidate caching
-- Proper geo scoring
+- Online geo scoring (timezone/language)
 - Structured logging
 - Metrics instrumentation
 - Load testing
+- Batch skill fetching
