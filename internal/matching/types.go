@@ -29,6 +29,8 @@ type CandidateInput struct {
 	FixedLat             *float64
 	FixedLng             *float64
 
+	Skills []uuid.UUID
+
 	AcceptanceRate        float64
 	MedianResponseSeconds int
 	PushOpenRate          float64
@@ -40,6 +42,7 @@ type CandidateInput struct {
 type ScoreBreakdown struct {
 	SkillMatch          float64
 	BudgetCompatibility float64
+	GeoRelevance        float64
 	ExperienceFit       float64
 	BehaviorIntent      float64
 	SpeedProbability    float64

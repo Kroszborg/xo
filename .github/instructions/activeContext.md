@@ -2,14 +2,14 @@
 
 ## Current Focus
 
-Session initialized. No active task in progress.
+All known gaps from initial session have been implemented.
 
 ---
 
 ## Project State Summary
 
 **Module:** `xo` (Go 1.25.0)  
-**Dependency:** `github.com/google/uuid v1.6.0`  
+**Dependencies:** `github.com/google/uuid v1.6.0`, `github.com/lib/pq v1.10.9`  
 **DB Layer:** PostgreSQL via sqlc v1.30.0  
 
 ### Completed Components
@@ -19,25 +19,21 @@ Session initialized. No active task in progress.
 | Database schema | `pkg/db/schema.sql` | Complete (10 tables, triggers, indexes) |
 | SQL queries | `pkg/db/queries.sql` | Complete (CRUD, hard filter, metrics) |
 | sqlc generated code | `pkg/db/db/` | Complete (models, queries, db interface) |
-| TURS types | `internal/matching/types.go` | Complete (TaskInput, CandidateInput, ScoreBreakdown) |
+| TURS types | `internal/matching/types.go` | Complete (TaskInput, CandidateInput w/ Skills, ScoreBreakdown w/ GeoRelevance) |
 | TURS service interface | `internal/matching/service.go` | Complete (ScoreCandidate, RankCandidates) |
 | TURS weights | `internal/matching/weights.go` | Complete (6 weight factors) |
-| TURS scoring engine | `internal/matching/turs.go` | Mostly complete (see gaps below) |
+| TURS scoring engine | `internal/matching/turs.go` | Complete (all 6 components including skillMatch + geoRelevance) |
+| Orchestrator | `internal/orchestrator/orchestrator.go` | Complete (wave-based priority flow, AcceptTask) |
+| Entry point | `cmd/xo/main.go` | Complete (graceful shutdown, env-based config) |
+| Unit tests | `internal/matching/turs_test.go` | Complete (16 tests, all passing) |
 
-### Known Gaps in Current Code
+### Previously Known Gaps — Now Resolved
 
-1. **`skillMatch()` is stubbed** — always returns 1.0 (no actual skill comparison logic)
-2. **GeoRelevance not implemented** — weight exists (0.15) but no scoring function and `ScoreBreakdown` is missing the field
-3. **No orchestrator code in workspace** — architecture doc describes it but no `cmd/` or orchestration package exists
-4. **No `main.go` or entry point** — project has no runnable binary yet
-5. **No tests** — no `_test.go` files anywhere
-
-### Database Tables
-
-- `users`, `user_profiles`, `skills`, `user_skills`
-- `user_behavior_metrics`, `experience_multiplier_history`
-- `tasks`, `task_required_skills`, `task_acceptances`
-- `task_notifications`, `task_state_transitions`
+1. **`skillMatch()`** — Real skill intersection logic (primary +10, each additional +6, cap 30, normalised 0–1)
+2. **GeoRelevance** — Haversine-based scoring for offline tasks; neutral 0.5 for online; `ScoreBreakdown.GeoRelevance` field added
+3. **Orchestrator** — Wave scheduling (15/wave, 60s intervals, 10min window), stop-on-accept, move-to-active fallback, transactional AcceptTask
+4. **Entry point** — `cmd/xo/main.go` with graceful signal handling
+5. **Tests** — 16 unit tests covering all TURS components
 
 ---
 
@@ -48,6 +44,7 @@ Session initialized. No active task in progress.
 - Stateless TURS scoring engine (pure functions, versionable weights)
 - Atomic task acceptance via `SELECT FOR UPDATE` + `UNIQUE(task_id)` constraint
 - Wave-based priority broadcasting (15 users/wave, 60s intervals, 10min window)
+- lib/pq as the postgres database/sql driver
 
 ---
 
@@ -57,13 +54,15 @@ Session initialized. No active task in progress.
 2. Crash-safe timeout recovery
 3. Event-driven architecture
 4. Redis candidate caching
-5. Proper geo scoring (Haversine distance)
+5. Proper geo scoring for online tasks (timezone/language)
 6. Structured logging
 7. Metrics instrumentation
 8. Load testing
+9. Batch skill fetching in orchestrator (currently N+1 per candidate)
 
 ---
 
 ## Last Updated
 
-Session start — full codebase exploration complete.
+Phase 3 implementation complete — all MVP gaps closed.
+
