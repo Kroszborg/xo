@@ -371,14 +371,14 @@ WHERE
     AND EXISTS (
         SELECT 1
         FROM user_skills us
+        JOIN task_required_skills trs ON trs.skill_id = us.skill_id AND trs.task_id = $2
         WHERE us.user_id = u.id
-        AND us.skill_id = ANY($2)
     )
 `
 
 type GetEligibleCandidatesParams struct {
-	Mab     string
-	SkillID uuid.UUID
+	Mab    string
+	TaskID uuid.UUID
 }
 
 type GetEligibleCandidatesRow struct {
@@ -401,9 +401,9 @@ type GetEligibleCandidatesRow struct {
 // HARD FILTER CANDIDATE QUERY (LIB/PQ SAFE)
 // ============================================================
 // $1 = task_budget (numeric)
-// $2 = skill_ids ([]uuid passed via pq.Array)
+// $2 = task_id (uuid)
 func (q *Queries) GetEligibleCandidates(ctx context.Context, arg GetEligibleCandidatesParams) ([]GetEligibleCandidatesRow, error) {
-	rows, err := q.db.QueryContext(ctx, getEligibleCandidates, arg.Mab, arg.SkillID)
+	rows, err := q.db.QueryContext(ctx, getEligibleCandidates, arg.Mab, arg.TaskID)
 	if err != nil {
 		return nil, err
 	}
