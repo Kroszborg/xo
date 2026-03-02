@@ -1,68 +1,30 @@
 # Progress
 
-## Current State
+## Completed
+- [x] Architecture redesign document written
+- [x] Memory files updated (steps.md, activeContext.md)
+- [x] DB schema updated: added 'completed' state + completed_at column
+- [x] DB queries added: CancelTask, CompleteTask, UpdateTask, ListTasks, GetNewUserCandidates, GetTaskAcceptance
+- [x] sqlc regenerated (v1.30.0)
+- [x] Dynamic weights: Weights.ForTask() redistributes geo weight proportionally for online tasks
+- [x] Cold-start: IsNewUser flag on CandidateInput, behavior-intent floor of 0.5 for new users
+- [x] Notification interface: Notifier with LogNotifier + WebhookNotifier implementations
+- [x] REST API: server.go (routes + middleware), handler.go (CRUD + accept + complete), response.go
+- [x] Orchestrator redesigned: cold-start exploration slots (15% per wave), Notifier integration, CompleteTask + EM update
+- [x] main.go: HTTP server with graceful shutdown, configurable via LISTEN_ADDR/DATABASE_URL/NOTIFICATION_WEBHOOK_URL
+- [x] Tests: 24/24 passing (16 existing + 8 new covering dynamic weights, cold-start, EM)
+- [x] go vet: clean
+- [x] go build ./...: clean
+- [x] Dockerfile updated: multi-stage build, LISTEN_ADDR/NOTIFICATION_WEBHOOK_URL env, EXPOSE 8080
+- [x] docker-compose.yml updated: ports 8080:8080, new env vars, removed TASK_ID
+- [x] Push notification strategy documented in architecture.md (FCM + @react-native-firebase)
+- [x] FCM integration: device_tokens table + queries + sqlc regenerated
+- [x] FCMNotifier: FCM HTTP v1 API with OAuth2, auto token refresh, stale token cleanup
+- [x] Device token API: PUT/DELETE /api/v1/devices, GET /api/v1/devices/{user_id}
+- [x] main.go: FCM_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS env var support
+- [x] Docker: FCM env vars + secrets volume mount in docker-compose
+- [x] Dependencies: golang.org/x/oauth2 added to go.mod
+- [x] Tests: 29/29 passing (24 matching + 5 notification)
 
-Core Engine: Complete  
-Matching Engine: Complete  
-Database Schema: Complete  
-Atomic Acceptance: Complete  
-Priority Orchestrator: Implemented (DB-only)  
-Wave Scheduling: Implemented  
-Timeout Fallback: Implemented  
-TURS Skill Matching: Implemented  
-TURS Geo Relevance: Implemented (Haversine, offline tasks)  
-Entry Point (cmd/xo): Implemented  
-Unit Tests: Implemented (16 tests)  
-
-System is functionally operational.
-
----
-
-## What Works End-to-End
-
-- Task creation
-- Hard filtering
-- TURS scoring (all 6 components)
-- Candidate ranking
-- Wave execution
-- Atomic acceptance
-- Priority → active transition
-- Graceful shutdown via signal handling
-
----
-
-## Known Limitations
-
-- Goroutine timeout not crash-safe
-- No distributed coordination
-- No exploration injection
-- Online task geo scoring returns neutral 0.5 (no timezone/language in CandidateInput yet)
-- Skill fetching is N+1 per candidate in orchestrator
-- No structured logging
-- No observability layer
-- No load testing
-
----
-
-## Next Milestones
-
-1. Add exploration injection
-2. Make timeout crash-safe
-3. Add structured logging
-4. Add timezone/language to CandidateInput for online geo scoring
-5. Batch skill fetching in orchestrator
-6. Add metrics instrumentation
-7. Introduce event-driven orchestration
-8. Add Redis candidate caching
-9. Prepare for horizontal scaling
-
----
-
-## Long-Term Direction
-
-- Fully distributed orchestrator
-- Event-driven architecture
-- Self-learning pricing engine
-- Exploration vs exploitation tuning
-- Marketplace health monitoring
-- Supply-demand balancing
+## Pending
+- None

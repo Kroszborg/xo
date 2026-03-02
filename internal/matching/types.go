@@ -37,6 +37,11 @@ type CandidateInput struct {
 	CompletionRate        float64
 	ReliabilityScore      float64
 	TotalTasksCompleted   int
+
+	// IsNewUser flags candidates with fewer than the cold-start threshold
+	// of completed tasks. The scoring engine applies a behavior-intent
+	// floor for these users to counteract zero-data penalties.
+	IsNewUser bool
 }
 
 type ScoreBreakdown struct {

@@ -142,6 +142,7 @@ CREATE TABLE tasks (
             'priority',
             'active',
             'accepted',
+            'completed',
             'expired',
             'cancelled'
         )
@@ -151,6 +152,7 @@ CREATE TABLE tasks (
     active_started_at TIMESTAMP,
     expires_at TIMESTAMP,
     accepted_at TIMESTAMP,
+    completed_at TIMESTAMP,
 
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
@@ -224,6 +226,25 @@ CREATE INDEX idx_task_state_transitions_task
     ON task_state_transitions(task_id);
 
 
+CREATE TABLE device_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+    token TEXT NOT NULL,
+
+    platform TEXT NOT NULL CHECK (platform IN ('android', 'ios')),
+
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+
+    UNIQUE (user_id, token)
+);
+
+CREATE INDEX idx_device_tokens_user ON device_tokens(user_id);
+CREATE INDEX idx_device_tokens_token ON device_tokens(token);
+
+
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -242,4 +263,8 @@ FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER trg_tasks_updated
 BEFORE UPDATE ON tasks
+FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER trg_device_tokens_updated
+BEFORE UPDATE ON device_tokens
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

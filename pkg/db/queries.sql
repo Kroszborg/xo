@@ -168,6 +168,40 @@ SET state = 'accepted',
     accepted_at = NOW()
 WHERE id = $1;
 
+-- name: CompleteTask :exec
+UPDATE tasks
+SET state = 'completed',
+    completed_at = NOW()
+WHERE id = $1
+AND state = 'accepted';
+
+-- name: CancelTask :execrows
+UPDATE tasks
+SET state = 'cancelled'
+WHERE id = $1
+AND state IN ('priority', 'active');
+
+-- name: UpdateTask :one
+UPDATE tasks
+SET budget = COALESCE($2, budget),
+    duration_hours = COALESCE($3, duration_hours),
+    complexity_level = COALESCE($4, complexity_level),
+    is_online = COALESCE($5, is_online),
+    lat = COALESCE($6, lat),
+    lng = COALESCE($7, lng),
+    radius_km = COALESCE($8, radius_km)
+WHERE id = $1
+AND state = 'active'
+RETURNING *;
+
+-- name: ListTasks :many
+SELECT *
+FROM tasks
+WHERE (sqlc.narg('state')::text IS NULL OR state = sqlc.narg('state')::text)
+  AND (sqlc.narg('category_id')::uuid IS NULL OR category_id = sqlc.narg('category_id')::uuid)
+ORDER BY created_at DESC
+LIMIT sqlc.arg('limit_val') OFFSET sqlc.arg('offset_val');
+
 -- name: ExpireTasks :exec
 UPDATE tasks
 SET state = 'expired'
@@ -300,3 +334,83 @@ SELECT
     / NULLIF(COUNT(*),0)
 FROM task_notifications
 WHERE created_at >= NOW() - INTERVAL '7 days';
+
+
+-- ============================================================
+-- COLD-START: NEW USERS WITH MATCHING SKILLS
+-- ============================================================
+
+-- $1 = task_budget (numeric)
+-- $2 = task_id (uuid)
+-- $3 = cold_start_threshold (int, e.g. 5)
+
+-- name: GetNewUserCandidates :many
+SELECT
+    u.id AS user_id,
+    up.experience_level,
+    up.experience_multiplier,
+    up.mab,
+    up.radius_km,
+    up.fixed_lat,
+    up.fixed_lng,
+    ubm.acceptance_rate,
+    ubm.median_response_seconds,
+    ubm.push_open_rate,
+    ubm.completion_rate,
+    ubm.reliability_score,
+    ubm.total_tasks_completed
+FROM users u
+JOIN user_profiles up ON up.user_id = u.id
+JOIN user_behavior_metrics ubm ON ubm.user_id = u.id
+WHERE
+    u.status = 'active'
+    AND ubm.total_tasks_completed < $3
+    AND $1 >= (0.5 * up.mab)
+    AND EXISTS (
+        SELECT 1
+        FROM user_skills us
+        JOIN task_required_skills trs ON trs.skill_id = us.skill_id AND trs.task_id = $2
+        WHERE us.user_id = u.id
+    );
+
+
+-- ============================================================
+-- TASK ACCEPTANCE LOOKUP
+-- ============================================================
+
+-- name: GetTaskAcceptance :one
+SELECT *
+FROM task_acceptances
+WHERE task_id = $1;
+
+
+-- ============================================================
+-- DEVICE TOKENS (FCM)
+-- ============================================================
+
+-- name: UpsertDeviceToken :one
+INSERT INTO device_tokens (user_id, token, platform)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, token)
+DO UPDATE SET platform = EXCLUDED.platform, updated_at = NOW()
+RETURNING *;
+
+-- name: DeleteDeviceToken :exec
+DELETE FROM device_tokens
+WHERE user_id = $1 AND token = $2;
+
+-- name: DeleteDeviceTokenByToken :exec
+DELETE FROM device_tokens
+WHERE token = $1;
+
+-- name: GetDeviceTokensByUserID :many
+SELECT *
+FROM device_tokens
+WHERE user_id = $1
+ORDER BY created_at DESC;
+
+-- name: GetDeviceTokensByUserIDs :many
+SELECT *
+FROM device_tokens
+WHERE user_id = ANY($1::uuid[])
+ORDER BY user_id, created_at DESC;

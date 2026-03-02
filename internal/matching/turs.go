@@ -22,6 +22,9 @@ func (s *tursService) ScoreCandidate(
 	c CandidateInput,
 ) ScoreBreakdown {
 
+	// Select weights based on task type (online vs offline).
+	w := s.weights.ForTask(task.IsOnline)
+
 	skill := s.skillMatch(task, c)
 	budget := s.budgetCompatibility(task, c)
 	geo := s.geoRelevance(task, c)
@@ -29,12 +32,12 @@ func (s *tursService) ScoreCandidate(
 	behavior := s.behaviorIntent(c)
 	speed := s.speedProbability(c)
 
-	final := (skill * s.weights.SkillMatch) +
-		(budget * s.weights.BudgetCompatibility) +
-		(geo * s.weights.GeoRelevance) +
-		(exp * s.weights.ExperienceFit) +
-		(behavior * s.weights.BehaviorIntent) +
-		(speed * s.weights.SpeedProbability)
+	final := (skill * w.SkillMatch) +
+		(budget * w.BudgetCompatibility) +
+		(geo * w.GeoRelevance) +
+		(exp * w.ExperienceFit) +
+		(behavior * w.BehaviorIntent) +
+		(speed * w.SpeedProbability)
 
 	return ScoreBreakdown{
 		SkillMatch:          skill,
@@ -107,9 +110,16 @@ func (s *tursService) experienceFit(task TaskInput, c CandidateInput) float64 {
 }
 
 func (s *tursService) behaviorIntent(c CandidateInput) float64 {
-	return (c.AcceptanceRate*0.6 +
+	raw := (c.AcceptanceRate*0.6 +
 		c.CompletionRate*0.3 +
 		(c.ReliabilityScore/100)*0.1)
+
+	// New users have zero acceptance rate which unfairly penalises them.
+	// Apply a floor of 0.5 so they remain competitive in priority waves.
+	if c.IsNewUser && raw < 0.5 {
+		return 0.5
+	}
+	return raw
 }
 
 func (s *tursService) speedProbability(c CandidateInput) float64 {

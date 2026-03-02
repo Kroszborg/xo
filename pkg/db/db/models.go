@@ -11,6 +11,15 @@ import (
 	"github.com/google/uuid"
 )
 
+type DeviceToken struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	Token     string
+	Platform  string
+	CreatedAt sql.NullTime
+	UpdatedAt sql.NullTime
+}
+
 type ExperienceMultiplierHistory struct {
 	ID             uuid.UUID
 	UserID         uuid.NullUUID
@@ -45,6 +54,7 @@ type Task struct {
 	ActiveStartedAt   sql.NullTime
 	ExpiresAt         sql.NullTime
 	AcceptedAt        sql.NullTime
+	CompletedAt       sql.NullTime
 	CreatedAt         sql.NullTime
 	UpdatedAt         sql.NullTime
 }

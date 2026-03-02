@@ -26,11 +26,22 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     environment:
       DATABASE_URL: postgres://xo:xo@postgres:5432/xo?sslmode=disable
-      # Set TASK_ID to a valid UUID at runtime to start a priority flow,
-      # e.g.:  docker compose run --rm -e TASK_ID=<uuid> xo
-      TASK_ID: ""
+      LISTEN_ADDR: ":8080"
+      # Set to an external push-notification service URL in production.
+      # When empty, notifications are logged to stdout.
+      NOTIFICATION_WEBHOOK_URL: ""
+      # FCM push notifications. Set FCM_PROJECT_ID and mount a service
+      # account key file to GOOGLE_APPLICATION_CREDENTIALS to enable.
+      FCM_PROJECT_ID: ""
+      GOOGLE_APPLICATION_CREDENTIALS: "/app/secrets/firebase-sa.json"
+    volumes:
+      # Mount Firebase service account key for FCM. Create this file locally
+      # or use Docker secrets in production.
+      - ./secrets:/app/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy

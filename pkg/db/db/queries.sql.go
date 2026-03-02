@@ -10,6 +10,7 @@ import (
 	"database/sql"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 const acceptTaskStateUpdate = `-- name: AcceptTaskStateUpdate :exec
@@ -65,6 +66,34 @@ func (q *Queries) AddUserSkill(ctx context.Context, arg AddUserSkillParams) erro
 	return err
 }
 
+const cancelTask = `-- name: CancelTask :execrows
+UPDATE tasks
+SET state = 'cancelled'
+WHERE id = $1
+AND state IN ('priority', 'active')
+`
+
+func (q *Queries) CancelTask(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cancelTask, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const completeTask = `-- name: CompleteTask :exec
+UPDATE tasks
+SET state = 'completed',
+    completed_at = NOW()
+WHERE id = $1
+AND state = 'accepted'
+`
+
+func (q *Queries) CompleteTask(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, completeTask, id)
+	return err
+}
+
 const createTaskPriority = `-- name: CreateTaskPriority :one
 
 INSERT INTO tasks (
@@ -87,7 +116,7 @@ VALUES (
     NOW(),
     NOW() + INTERVAL '24 hours'
 )
-RETURNING id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, created_at, updated_at
+RETURNING id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, completed_at, created_at, updated_at
 `
 
 type CreateTaskPriorityParams struct {
@@ -134,6 +163,7 @@ func (q *Queries) CreateTaskPriority(ctx context.Context, arg CreateTaskPriority
 		&i.ActiveStartedAt,
 		&i.ExpiresAt,
 		&i.AcceptedAt,
+		&i.CompletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -225,6 +255,31 @@ func (q *Queries) CreateUserProfile(ctx context.Context, arg CreateUserProfilePa
 	return err
 }
 
+const deleteDeviceToken = `-- name: DeleteDeviceToken :exec
+DELETE FROM device_tokens
+WHERE user_id = $1 AND token = $2
+`
+
+type DeleteDeviceTokenParams struct {
+	UserID uuid.UUID
+	Token  string
+}
+
+func (q *Queries) DeleteDeviceToken(ctx context.Context, arg DeleteDeviceTokenParams) error {
+	_, err := q.db.ExecContext(ctx, deleteDeviceToken, arg.UserID, arg.Token)
+	return err
+}
+
+const deleteDeviceTokenByToken = `-- name: DeleteDeviceTokenByToken :exec
+DELETE FROM device_tokens
+WHERE token = $1
+`
+
+func (q *Queries) DeleteDeviceTokenByToken(ctx context.Context, token string) error {
+	_, err := q.db.ExecContext(ctx, deleteDeviceTokenByToken, token)
+	return err
+}
+
 const expireTasks = `-- name: ExpireTasks :exec
 UPDATE tasks
 SET state = 'expired'
@@ -258,7 +313,7 @@ func (q *Queries) GetAcceptanceLatencyP50(ctx context.Context) (float64, error) 
 const getActiveTasksForUser = `-- name: GetActiveTasksForUser :many
 
 
-SELECT id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, created_at, updated_at
+SELECT id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, completed_at, created_at, updated_at
 FROM tasks
 WHERE state = 'active'
 AND expires_at > NOW()
@@ -305,6 +360,7 @@ func (q *Queries) GetActiveTasksForUser(ctx context.Context, arg GetActiveTasksF
 			&i.ActiveStartedAt,
 			&i.ExpiresAt,
 			&i.AcceptedAt,
+			&i.CompletedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -342,6 +398,80 @@ func (q *Queries) GetBehaviorMetrics(ctx context.Context, userID uuid.UUID) (Use
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getDeviceTokensByUserID = `-- name: GetDeviceTokensByUserID :many
+SELECT id, user_id, token, platform, created_at, updated_at
+FROM device_tokens
+WHERE user_id = $1
+ORDER BY created_at DESC
+`
+
+func (q *Queries) GetDeviceTokensByUserID(ctx context.Context, userID uuid.UUID) ([]DeviceToken, error) {
+	rows, err := q.db.QueryContext(ctx, getDeviceTokensByUserID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeviceToken
+	for rows.Next() {
+		var i DeviceToken
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Token,
+			&i.Platform,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getDeviceTokensByUserIDs = `-- name: GetDeviceTokensByUserIDs :many
+SELECT id, user_id, token, platform, created_at, updated_at
+FROM device_tokens
+WHERE user_id = ANY($1::uuid[])
+ORDER BY user_id, created_at DESC
+`
+
+func (q *Queries) GetDeviceTokensByUserIDs(ctx context.Context, dollar_1 []uuid.UUID) ([]DeviceToken, error) {
+	rows, err := q.db.QueryContext(ctx, getDeviceTokensByUserIDs, pq.Array(dollar_1))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeviceToken
+	for rows.Next() {
+		var i DeviceToken
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Token,
+			&i.Platform,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getEligibleCandidates = `-- name: GetEligibleCandidates :many
@@ -439,6 +569,103 @@ func (q *Queries) GetEligibleCandidates(ctx context.Context, arg GetEligibleCand
 	return items, nil
 }
 
+const getNewUserCandidates = `-- name: GetNewUserCandidates :many
+
+
+SELECT
+    u.id AS user_id,
+    up.experience_level,
+    up.experience_multiplier,
+    up.mab,
+    up.radius_km,
+    up.fixed_lat,
+    up.fixed_lng,
+    ubm.acceptance_rate,
+    ubm.median_response_seconds,
+    ubm.push_open_rate,
+    ubm.completion_rate,
+    ubm.reliability_score,
+    ubm.total_tasks_completed
+FROM users u
+JOIN user_profiles up ON up.user_id = u.id
+JOIN user_behavior_metrics ubm ON ubm.user_id = u.id
+WHERE
+    u.status = 'active'
+    AND ubm.total_tasks_completed < $3
+    AND $1 >= (0.5 * up.mab)
+    AND EXISTS (
+        SELECT 1
+        FROM user_skills us
+        JOIN task_required_skills trs ON trs.skill_id = us.skill_id AND trs.task_id = $2
+        WHERE us.user_id = u.id
+    )
+`
+
+type GetNewUserCandidatesParams struct {
+	Mab                 string
+	TaskID              uuid.UUID
+	TotalTasksCompleted sql.NullInt32
+}
+
+type GetNewUserCandidatesRow struct {
+	UserID                uuid.UUID
+	ExperienceLevel       string
+	ExperienceMultiplier  string
+	Mab                   string
+	RadiusKm              int32
+	FixedLat              sql.NullString
+	FixedLng              sql.NullString
+	AcceptanceRate        sql.NullString
+	MedianResponseSeconds sql.NullInt32
+	PushOpenRate          sql.NullString
+	CompletionRate        sql.NullString
+	ReliabilityScore      sql.NullString
+	TotalTasksCompleted   sql.NullInt32
+}
+
+// ============================================================
+// COLD-START: NEW USERS WITH MATCHING SKILLS
+// ============================================================
+// $1 = task_budget (numeric)
+// $2 = task_id (uuid)
+// $3 = cold_start_threshold (int, e.g. 5)
+func (q *Queries) GetNewUserCandidates(ctx context.Context, arg GetNewUserCandidatesParams) ([]GetNewUserCandidatesRow, error) {
+	rows, err := q.db.QueryContext(ctx, getNewUserCandidates, arg.Mab, arg.TaskID, arg.TotalTasksCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetNewUserCandidatesRow
+	for rows.Next() {
+		var i GetNewUserCandidatesRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.ExperienceLevel,
+			&i.ExperienceMultiplier,
+			&i.Mab,
+			&i.RadiusKm,
+			&i.FixedLat,
+			&i.FixedLng,
+			&i.AcceptanceRate,
+			&i.MedianResponseSeconds,
+			&i.PushOpenRate,
+			&i.CompletionRate,
+			&i.ReliabilityScore,
+			&i.TotalTasksCompleted,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getNotificationWasteRatio = `-- name: GetNotificationWasteRatio :one
 SELECT
     COUNT(*) FILTER (WHERE status = 'ignored')::decimal
@@ -454,8 +681,32 @@ func (q *Queries) GetNotificationWasteRatio(ctx context.Context) (int32, error) 
 	return column_1, err
 }
 
+const getTaskAcceptance = `-- name: GetTaskAcceptance :one
+
+SELECT id, task_id, user_id, accepted_budget, response_time_seconds, created_at
+FROM task_acceptances
+WHERE task_id = $1
+`
+
+// ============================================================
+// TASK ACCEPTANCE LOOKUP
+// ============================================================
+func (q *Queries) GetTaskAcceptance(ctx context.Context, taskID uuid.NullUUID) (TaskAcceptance, error) {
+	row := q.db.QueryRowContext(ctx, getTaskAcceptance, taskID)
+	var i TaskAcceptance
+	err := row.Scan(
+		&i.ID,
+		&i.TaskID,
+		&i.UserID,
+		&i.AcceptedBudget,
+		&i.ResponseTimeSeconds,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getTaskByID = `-- name: GetTaskByID :one
-SELECT id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, created_at, updated_at
+SELECT id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, completed_at, created_at, updated_at
 FROM tasks
 WHERE id = $1
 `
@@ -479,6 +730,7 @@ func (q *Queries) GetTaskByID(ctx context.Context, id uuid.UUID) (Task, error) {
 		&i.ActiveStartedAt,
 		&i.ExpiresAt,
 		&i.AcceptedAt,
+		&i.CompletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -486,7 +738,7 @@ func (q *Queries) GetTaskByID(ctx context.Context, id uuid.UUID) (Task, error) {
 }
 
 const getTaskForUpdate = `-- name: GetTaskForUpdate :one
-SELECT id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, created_at, updated_at
+SELECT id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, completed_at, created_at, updated_at
 FROM tasks
 WHERE id = $1
 FOR UPDATE
@@ -511,6 +763,7 @@ func (q *Queries) GetTaskForUpdate(ctx context.Context, id uuid.UUID) (Task, err
 		&i.ActiveStartedAt,
 		&i.ExpiresAt,
 		&i.AcceptedAt,
+		&i.CompletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -752,6 +1005,69 @@ func (q *Queries) InsertTaskNotificationsBulk(ctx context.Context, arg InsertTas
 	return err
 }
 
+const listTasks = `-- name: ListTasks :many
+SELECT id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, completed_at, created_at, updated_at
+FROM tasks
+WHERE ($1::text IS NULL OR state = $1::text)
+  AND ($2::uuid IS NULL OR category_id = $2::uuid)
+ORDER BY created_at DESC
+LIMIT $4 OFFSET $3
+`
+
+type ListTasksParams struct {
+	State      sql.NullString
+	CategoryID uuid.NullUUID
+	OffsetVal  int32
+	LimitVal   int32
+}
+
+func (q *Queries) ListTasks(ctx context.Context, arg ListTasksParams) ([]Task, error) {
+	rows, err := q.db.QueryContext(ctx, listTasks,
+		arg.State,
+		arg.CategoryID,
+		arg.OffsetVal,
+		arg.LimitVal,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.ID,
+			&i.TaskGiverID,
+			&i.CategoryID,
+			&i.Budget,
+			&i.DurationHours,
+			&i.ComplexityLevel,
+			&i.IsOnline,
+			&i.Lat,
+			&i.Lng,
+			&i.RadiusKm,
+			&i.State,
+			&i.PriorityStartedAt,
+			&i.ActiveStartedAt,
+			&i.ExpiresAt,
+			&i.AcceptedAt,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markNotificationOpened = `-- name: MarkNotificationOpened :exec
 UPDATE task_notifications
 SET opened_at = NOW(),
@@ -847,6 +1163,66 @@ func (q *Queries) UpdateLastActive(ctx context.Context, userID uuid.UUID) error 
 	return err
 }
 
+const updateTask = `-- name: UpdateTask :one
+UPDATE tasks
+SET budget = COALESCE($2, budget),
+    duration_hours = COALESCE($3, duration_hours),
+    complexity_level = COALESCE($4, complexity_level),
+    is_online = COALESCE($5, is_online),
+    lat = COALESCE($6, lat),
+    lng = COALESCE($7, lng),
+    radius_km = COALESCE($8, radius_km)
+WHERE id = $1
+AND state = 'active'
+RETURNING id, task_giver_id, category_id, budget, duration_hours, complexity_level, is_online, lat, lng, radius_km, state, priority_started_at, active_started_at, expires_at, accepted_at, completed_at, created_at, updated_at
+`
+
+type UpdateTaskParams struct {
+	ID              uuid.UUID
+	Budget          string
+	DurationHours   sql.NullInt32
+	ComplexityLevel sql.NullString
+	IsOnline        sql.NullBool
+	Lat             sql.NullString
+	Lng             sql.NullString
+	RadiusKm        sql.NullInt32
+}
+
+func (q *Queries) UpdateTask(ctx context.Context, arg UpdateTaskParams) (Task, error) {
+	row := q.db.QueryRowContext(ctx, updateTask,
+		arg.ID,
+		arg.Budget,
+		arg.DurationHours,
+		arg.ComplexityLevel,
+		arg.IsOnline,
+		arg.Lat,
+		arg.Lng,
+		arg.RadiusKm,
+	)
+	var i Task
+	err := row.Scan(
+		&i.ID,
+		&i.TaskGiverID,
+		&i.CategoryID,
+		&i.Budget,
+		&i.DurationHours,
+		&i.ComplexityLevel,
+		&i.IsOnline,
+		&i.Lat,
+		&i.Lng,
+		&i.RadiusKm,
+		&i.State,
+		&i.PriorityStartedAt,
+		&i.ActiveStartedAt,
+		&i.ExpiresAt,
+		&i.AcceptedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateUserStatus = `-- name: UpdateUserStatus :exec
 UPDATE users
 SET status = $2
@@ -861,4 +1237,36 @@ type UpdateUserStatusParams struct {
 func (q *Queries) UpdateUserStatus(ctx context.Context, arg UpdateUserStatusParams) error {
 	_, err := q.db.ExecContext(ctx, updateUserStatus, arg.ID, arg.Status)
 	return err
+}
+
+const upsertDeviceToken = `-- name: UpsertDeviceToken :one
+
+INSERT INTO device_tokens (user_id, token, platform)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, token)
+DO UPDATE SET platform = EXCLUDED.platform, updated_at = NOW()
+RETURNING id, user_id, token, platform, created_at, updated_at
+`
+
+type UpsertDeviceTokenParams struct {
+	UserID   uuid.UUID
+	Token    string
+	Platform string
+}
+
+// ============================================================
+// DEVICE TOKENS (FCM)
+// ============================================================
+func (q *Queries) UpsertDeviceToken(ctx context.Context, arg UpsertDeviceTokenParams) (DeviceToken, error) {
+	row := q.db.QueryRowContext(ctx, upsertDeviceToken, arg.UserID, arg.Token, arg.Platform)
+	var i DeviceToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Token,
+		&i.Platform,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

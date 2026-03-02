@@ -1,68 +1,27 @@
 # Active Context
 
-## Current Focus
+## Current Work
+FCM push notification integration complete. xo now supports direct FCM delivery.
 
-All known gaps from initial session have been implemented.
+## Key Decisions
+- Go 1.25 net/http ServeMux for routing (no third-party router)
+- Online tasks: GeoRelevance weight = 0, redistributed proportionally to remaining 5 dimensions
+- Cold-start: users with < 5 completed tasks get exploration slots (15% per wave) + behavior-intent floor of 0.5
+- Notification: interface-based (LogNotifier for dev, WebhookNotifier for webhook, FCMNotifier for push)
+- FCM: integrated directly into xo via FCM HTTP v1 API + golang.org/x/oauth2/google ADC
+- FCM auth: GOOGLE_APPLICATION_CREDENTIALS + FCM_PROJECT_ID env vars
+- Device tokens: stored in device_tokens table with user_id + token + platform (android/ios)
+- Stale token cleanup: automatic on FCM NOT_FOUND/UNREGISTERED errors
+- EM update happens on POST /tasks/{id}/complete using adaptive alpha (0.20 → 0.10 → 0.05)
+- Task states: priority → active → accepted → completed (also: expired, cancelled)
 
----
-
-## Project State Summary
-
-**Module:** `xo` (Go 1.25.0)  
-**Dependencies:** `github.com/google/uuid v1.6.0`, `github.com/lib/pq v1.10.9`  
-**DB Layer:** PostgreSQL via sqlc v1.30.0  
-
-### Completed Components
-
-| Component | Location | Status |
-|---|---|---|
-| Database schema | `pkg/db/schema.sql` | Complete (10 tables, triggers, indexes) |
-| SQL queries | `pkg/db/queries.sql` | Complete (CRUD, hard filter, metrics) |
-| sqlc generated code | `pkg/db/db/` | Complete (models, queries, db interface) |
-| TURS types | `internal/matching/types.go` | Complete (TaskInput, CandidateInput w/ Skills, ScoreBreakdown w/ GeoRelevance) |
-| TURS service interface | `internal/matching/service.go` | Complete (ScoreCandidate, RankCandidates) |
-| TURS weights | `internal/matching/weights.go` | Complete (6 weight factors) |
-| TURS scoring engine | `internal/matching/turs.go` | Complete (all 6 components including skillMatch + geoRelevance) |
-| Orchestrator | `internal/orchestrator/orchestrator.go` | Complete (wave-based priority flow, AcceptTask) |
-| Entry point | `cmd/xo/main.go` | Complete (graceful shutdown, env-based config) |
-| Unit tests | `internal/matching/turs_test.go` | Complete (16 tests, all passing) |
-
-### Previously Known Gaps — Now Resolved
-
-1. **`skillMatch()`** — Real skill intersection logic (primary +10, each additional +6, cap 30, normalised 0–1)
-2. **GeoRelevance** — Haversine-based scoring for offline tasks; neutral 0.5 for online; `ScoreBreakdown.GeoRelevance` field added
-3. **Orchestrator** — Wave scheduling (15/wave, 60s intervals, 10min window), stop-on-accept, move-to-active fallback, transactional AcceptTask
-4. **Entry point** — `cmd/xo/main.go` with graceful signal handling
-5. **Tests** — 16 unit tests covering all TURS components
-
----
-
-## Architecture Decisions
-
-- PostgreSQL as single source of truth (no Redis/event bus yet)
-- sqlc for type-safe query generation
-- Stateless TURS scoring engine (pure functions, versionable weights)
-- Atomic task acceptance via `SELECT FOR UPDATE` + `UNIQUE(task_id)` constraint
-- Wave-based priority broadcasting (15 users/wave, 60s intervals, 10min window)
-- lib/pq as the postgres database/sql driver
-
----
-
-## Pending Phase 4 Enhancements
-
-1. Exploration injection (10-15% randomness)
-2. Crash-safe timeout recovery
-3. Event-driven architecture
-4. Redis candidate caching
-5. Proper geo scoring for online tasks (timezone/language)
-6. Structured logging
-7. Metrics instrumentation
-8. Load testing
-9. Batch skill fetching in orchestrator (currently N+1 per candidate)
-
----
-
-## Last Updated
-
-Phase 3 implementation complete — all MVP gaps closed.
-
+## Files Being Modified
+- pkg/db/schema.sql — add 'completed' state, completed_at column
+- pkg/db/queries.sql — new queries for CRUD, cold-start candidates, task completion
+- internal/matching/weights.go — dynamic weight computation
+- internal/matching/turs.go — cold-start behavior baseline
+- internal/matching/types.go — IsNewUser flag on CandidateInput
+- internal/api/ — new package (server.go, handler.go, response.go)
+- internal/notification/ — new package (notifier.go)
+- internal/orchestrator/orchestrator.go — cold-start slots, notifier integration
+- cmd/xo/main.go — HTTP server with graceful shutdown

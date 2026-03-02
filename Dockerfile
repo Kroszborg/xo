@@ -23,7 +23,15 @@ COPY --from=builder /xo /app/xo
 # script if needed outside of a migration tool.
 COPY pkg/db/schema.sql /app/schema.sql
 
+# ── Environment ──────────────────────────────────────────────────────────────
 ENV DATABASE_URL=""
-ENV TASK_ID=""
+ENV LISTEN_ADDR=":8080"
+ENV NOTIFICATION_WEBHOOK_URL=""
+
+# FCM push notifications (set FCM_PROJECT_ID + mount service account JSON).
+ENV FCM_PROJECT_ID=""
+ENV GOOGLE_APPLICATION_CREDENTIALS=""
+
+EXPOSE 8080
 
 ENTRYPOINT ["/app/xo"]

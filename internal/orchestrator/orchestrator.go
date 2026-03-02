@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -13,29 +14,34 @@ import (
 	db "xo/pkg/db/db"
 
 	"xo/internal/matching"
+	"xo/internal/notification"
 )
 
 const (
-	priorityDuration = 10 * time.Minute
-	waveInterval     = 60 * time.Second
-	waveSize         = 15
+	priorityDuration   = 10 * time.Minute
+	waveInterval       = 60 * time.Second
+	waveSize           = 15
+	coldStartThreshold = 5  // users with fewer completed tasks are "new"
+	explorationPercent = 15 // percent of each wave reserved for new users
 )
 
 // Orchestrator drives the priority flow for tasks: it scores candidates,
-// sends wave-based notifications, and moves tasks to active if no one accepts
-// within the priority window.
+// sends wave-based notifications (with cold-start exploration slots), and
+// manages task lifecycle transitions including completion and EM updates.
 type Orchestrator struct {
-	sqlDB *sql.DB
-	q     *db.Queries
-	turs  matching.TURSService
+	sqlDB    *sql.DB
+	q        *db.Queries
+	turs     matching.TURSService
+	notifier notification.Notifier
 }
 
-// New creates an Orchestrator backed by sqlDB and the provided TURSService.
-func New(sqlDB *sql.DB, turs matching.TURSService) *Orchestrator {
+// New creates an Orchestrator backed by sqlDB, the provided TURSService, and a Notifier.
+func New(sqlDB *sql.DB, turs matching.TURSService, notifier notification.Notifier) *Orchestrator {
 	return &Orchestrator{
-		sqlDB: sqlDB,
-		q:     db.New(sqlDB),
-		turs:  turs,
+		sqlDB:    sqlDB,
+		q:        db.New(sqlDB),
+		turs:     turs,
+		notifier: notifier,
 	}
 }
 
@@ -96,6 +102,120 @@ func (o *Orchestrator) AcceptTask(
 	return nil
 }
 
+// CompleteTask marks a task as completed and updates the accepting user's
+// Experience Multiplier using the adaptive EM formula. All writes happen
+// inside a single transaction.
+func (o *Orchestrator) CompleteTask(ctx context.Context, taskID uuid.UUID) error {
+	tx, err := o.sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	qtx := o.q.WithTx(tx)
+
+	// 1. Transition state to completed.
+	err = qtx.CompleteTask(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("complete task: %w", err)
+	}
+
+	// 2. Fetch acceptance record for the budget and user ID.
+	acceptance, err := qtx.GetTaskAcceptance(ctx, uuid.NullUUID{UUID: taskID, Valid: true})
+	if err != nil {
+		return fmt.Errorf("get task acceptance: %w", err)
+	}
+
+	userID := acceptance.UserID.UUID
+
+	// 3. Get shown budget from the task.
+	task, err := qtx.GetTaskByID(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("get task: %w", err)
+	}
+
+	// 4. Get current EM from user profile (locked for update).
+	profile, err := qtx.GetUserProfileForUpdate(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("get user profile: %w", err)
+	}
+
+	// 5. Get behavior metrics to determine alpha.
+	metrics, err := qtx.GetBehaviorMetrics(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("get behavior metrics: %w", err)
+	}
+
+	// 6. Compute adaptive alpha.
+	totalAccepted := 0
+	if metrics.TotalTasksAccepted.Valid {
+		totalAccepted = int(metrics.TotalTasksAccepted.Int32)
+	}
+	alpha := adaptiveAlpha(totalAccepted)
+
+	// 7. Calculate new EM.
+	acceptedBudget, _ := strconv.ParseFloat(acceptance.AcceptedBudget, 64)
+	shownBudget, _ := strconv.ParseFloat(task.Budget, 64)
+	oldEM, _ := strconv.ParseFloat(profile.ExperienceMultiplier, 64)
+
+	newEM := oldEM*(1-alpha) + oldEM*(acceptedBudget/shownBudget)*alpha
+	newEM = math.Max(0.5, math.Min(newEM, 2.0))
+
+	// 8. Persist EM update.
+	err = qtx.UpdateExperienceMultiplier(ctx, db.UpdateExperienceMultiplierParams{
+		UserID:               userID,
+		ExperienceMultiplier: fmt.Sprintf("%.2f", newEM),
+	})
+	if err != nil {
+		return fmt.Errorf("update experience multiplier: %w", err)
+	}
+
+	// 9. Record EM history.
+	err = qtx.InsertEMHistory(ctx, db.InsertEMHistoryParams{
+		UserID:         uuid.NullUUID{UUID: userID, Valid: true},
+		OldMultiplier:  sql.NullString{String: fmt.Sprintf("%.2f", oldEM), Valid: true},
+		NewMultiplier:  sql.NullString{String: fmt.Sprintf("%.2f", newEM), Valid: true},
+		AcceptedBudget: sql.NullString{String: acceptance.AcceptedBudget, Valid: true},
+		ShownBudget:    sql.NullString{String: task.Budget, Valid: true},
+		Alpha:          sql.NullString{String: fmt.Sprintf("%.2f", alpha), Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("insert em history: %w", err)
+	}
+
+	// 10. Increment completed tasks counter.
+	err = qtx.IncrementCompletedTasks(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("increment completed tasks: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// adaptiveAlpha returns the EM learning rate based on the number of tasks
+// the user has accepted so far.
+func adaptiveAlpha(totalAccepted int) float64 {
+	switch {
+	case totalAccepted < 5:
+		return 0.20
+	case totalAccepted < 10:
+		return 0.10
+	default:
+		return 0.05
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Priority Flow
+// ---------------------------------------------------------------------------
+
 // runPriorityFlow executes the full priority-window logic for a single task.
 func (o *Orchestrator) runPriorityFlow(parent context.Context, taskID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(parent, priorityDuration)
@@ -113,12 +233,24 @@ func (o *Orchestrator) runPriorityFlow(parent context.Context, taskID uuid.UUID)
 		return
 	}
 
-	rows, err := o.q.GetEligibleCandidates(ctx, db.GetEligibleCandidatesParams{
+	// Fetch regular eligible candidates.
+	regularRows, err := o.q.GetEligibleCandidates(ctx, db.GetEligibleCandidatesParams{
 		Mab:    task.Budget,
 		TaskID: taskID,
 	})
 	if err != nil {
 		fmt.Printf("[orchestrator] failed to fetch candidates for task %s: %v\n", taskID, err)
+		return
+	}
+
+	// Fetch cold-start (new user) candidates.
+	newUserRows, err := o.q.GetNewUserCandidates(ctx, db.GetNewUserCandidatesParams{
+		Mab:                 task.Budget,
+		TaskID:              taskID,
+		TotalTasksCompleted: sql.NullInt32{Int32: int32(coldStartThreshold), Valid: true},
+	})
+	if err != nil {
+		fmt.Printf("[orchestrator] failed to fetch new user candidates for task %s: %v\n", taskID, err)
 		return
 	}
 
@@ -128,56 +260,120 @@ func (o *Orchestrator) runPriorityFlow(parent context.Context, taskID uuid.UUID)
 		return
 	}
 
-	candidates, err := o.toCandidateInputs(ctx, rows)
-	if err != nil {
-		fmt.Printf("[orchestrator] failed to convert candidates for task %s: %v\n", taskID, err)
-		return
+	// Build a set of new user IDs for deduplication.
+	newUserSet := make(map[uuid.UUID]struct{}, len(newUserRows))
+	for _, r := range newUserRows {
+		newUserSet[r.UserID] = struct{}{}
 	}
 
-	if len(candidates) == 0 {
+	// Convert regular candidates, excluding those already in the new-user set.
+	var regularCandidates []matching.CandidateInput
+	for _, r := range regularRows {
+		if _, isNew := newUserSet[r.UserID]; isNew {
+			continue
+		}
+		c, err := toRegularCandidate(ctx, o.q, r)
+		if err != nil {
+			fmt.Printf("[orchestrator] skip regular candidate %s: %v\n", r.UserID, err)
+			continue
+		}
+		regularCandidates = append(regularCandidates, c)
+	}
+
+	// Convert new user candidates.
+	var newCandidates []matching.CandidateInput
+	for _, r := range newUserRows {
+		c, err := toNewUserCandidate(ctx, o.q, r)
+		if err != nil {
+			fmt.Printf("[orchestrator] skip new candidate %s: %v\n", r.UserID, err)
+			continue
+		}
+		newCandidates = append(newCandidates, c)
+	}
+
+	if len(regularCandidates) == 0 && len(newCandidates) == 0 {
 		fmt.Printf("[orchestrator] no eligible candidates for task %s; moving to active\n", taskID)
-		// Use a fresh background context: ctx may already be cancelled or the
-		// parent context may have a shorter deadline than the cleanup needs.
 		_ = o.q.MoveTaskToActive(context.Background(), taskID)
 		return
 	}
 
-	ranked := o.turs.RankCandidates(taskInput, candidates)
+	// Score and rank both pools.
+	rankedRegular := o.turs.RankCandidates(taskInput, regularCandidates)
+	rankedNew := o.turs.RankCandidates(taskInput, newCandidates)
 
+	// Send waves with exploration slots.
+	o.sendWaves(ctx, taskID, rankedRegular, rankedNew)
+}
+
+// sendWaves delivers ranked candidates in waves, reserving explorationPercent
+// of each wave for new users to ensure cold-start visibility.
+func (o *Orchestrator) sendWaves(
+	ctx context.Context,
+	taskID uuid.UUID,
+	regular []matching.RankedCandidate,
+	newUsers []matching.RankedCandidate,
+) {
+	explorationSlots := max(1, waveSize*explorationPercent/100) // at least 1 slot
+	regularSlots := waveSize - explorationSlots
+
+	regIdx, newIdx := 0, 0
 	waveNum := 1
-	for offset := 0; offset < len(ranked); offset += waveSize {
+
+	for regIdx < len(regular) || newIdx < len(newUsers) {
+		// Check if task was already accepted.
 		current, err := o.q.GetTaskByID(ctx, taskID)
 		if err == nil && current.State == "accepted" {
-			fmt.Printf("[orchestrator] task %s already accepted; stopping waves\n", taskID)
+			fmt.Printf("[orchestrator] task %s accepted; stopping waves\n", taskID)
 			return
 		}
 
-		end := offset + waveSize
-		if end > len(ranked) {
-			end = len(ranked)
-		}
-		wave := ranked[offset:end]
-		userIDs := make([]uuid.UUID, len(wave))
-		for i, rc := range wave {
-			userIDs[i] = rc.UserID
+		var wave []uuid.UUID
+
+		// Fill regular slots.
+		for i := 0; i < regularSlots && regIdx < len(regular); i++ {
+			wave = append(wave, regular[regIdx].UserID)
+			regIdx++
 		}
 
+		// Fill exploration slots with new users.
+		for i := 0; i < explorationSlots && newIdx < len(newUsers); i++ {
+			wave = append(wave, newUsers[newIdx].UserID)
+			newIdx++
+		}
+
+		// If either pool is exhausted, fill remaining from the other.
+		for len(wave) < waveSize && regIdx < len(regular) {
+			wave = append(wave, regular[regIdx].UserID)
+			regIdx++
+		}
+		for len(wave) < waveSize && newIdx < len(newUsers) {
+			wave = append(wave, newUsers[newIdx].UserID)
+			newIdx++
+		}
+
+		if len(wave) == 0 {
+			break
+		}
+
+		// Persist notifications in DB.
 		err = o.q.InsertTaskNotificationsBulk(ctx, db.InsertTaskNotificationsBulkParams{
 			TaskID:     uuid.NullUUID{UUID: taskID, Valid: true},
-			Unnest:     pq.Array(userIDs),
+			Unnest:     pq.Array(wave),
 			WaveNumber: sql.NullInt32{Int32: int32(waveNum), Valid: true},
 		})
 		if err != nil {
 			fmt.Printf("[orchestrator] failed to insert notifications (wave %d, task %s): %v\n", waveNum, taskID, err)
 		}
 
-		fmt.Printf("[orchestrator] wave %d: notified %d users for task %s\n", waveNum, len(userIDs), taskID)
+		// Deliver notifications via the Notifier interface.
+		if notifyErr := o.notifier.Notify(ctx, taskID, wave, waveNum); notifyErr != nil {
+			fmt.Printf("[orchestrator] notification delivery failed (wave %d, task %s): %v\n", waveNum, taskID, notifyErr)
+		}
+
 		waveNum++
 
 		select {
 		case <-ctx.Done():
-			// Priority window expired; use a fresh context because ctx is
-			// already cancelled and DB operations on it would fail immediately.
 			fmt.Printf("[orchestrator] priority window expired for task %s; moving to active\n", taskID)
 			_ = o.q.MoveTaskToActive(context.Background(), taskID)
 			return
@@ -185,14 +381,17 @@ func (o *Orchestrator) runPriorityFlow(parent context.Context, taskID uuid.UUID)
 		}
 	}
 
-	// All ranked candidates have been notified; wait for window to expire.
+	// All candidates notified; wait for priority window to expire.
 	select {
 	case <-ctx.Done():
-		// Same rationale: ctx is cancelled, use a fresh context for cleanup.
 		fmt.Printf("[orchestrator] priority window expired for task %s; moving to active\n", taskID)
 		_ = o.q.MoveTaskToActive(context.Background(), taskID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Model conversions
+// ---------------------------------------------------------------------------
 
 // toTaskInput converts a DB Task row and its skill IDs to a matching.TaskInput.
 func toTaskInput(t db.Task, skillIDs []uuid.UUID) (matching.TaskInput, error) {
@@ -257,103 +456,103 @@ func toTaskInput(t db.Task, skillIDs []uuid.UUID) (matching.TaskInput, error) {
 	}, nil
 }
 
-// toCandidateInputs converts eligible candidate rows to matching.CandidateInput
-// slices, fetching each candidate's skills individually.
-func (o *Orchestrator) toCandidateInputs(
-	ctx context.Context,
-	rows []db.GetEligibleCandidatesRow,
-) ([]matching.CandidateInput, error) {
-	result := make([]matching.CandidateInput, 0, len(rows))
-	for _, r := range rows {
-		skills, err := o.q.GetUserSkills(ctx, r.UserID)
-		if err != nil {
-			return nil, fmt.Errorf("get skills for user %s: %w", r.UserID, err)
-		}
-
-		em, err := strconv.ParseFloat(r.ExperienceMultiplier, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse experience_multiplier for user %s: %w", r.UserID, err)
-		}
-
-		mab, err := strconv.ParseFloat(r.Mab, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse mab for user %s: %w", r.UserID, err)
-		}
-
-		var lat, lng *float64
-		if r.FixedLat.Valid {
-			v, err := strconv.ParseFloat(r.FixedLat.String, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse fixed_lat for user %s: %w", r.UserID, err)
-			}
-			lat = &v
-		}
-		if r.FixedLng.Valid {
-			v, err := strconv.ParseFloat(r.FixedLng.String, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse fixed_lng for user %s: %w", r.UserID, err)
-			}
-			lng = &v
-		}
-
-		var acceptanceRate float64
-		if r.AcceptanceRate.Valid {
-			acceptanceRate, err = strconv.ParseFloat(r.AcceptanceRate.String, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse acceptance_rate for user %s: %w", r.UserID, err)
-			}
-		}
-
-		var pushOpenRate float64
-		if r.PushOpenRate.Valid {
-			pushOpenRate, err = strconv.ParseFloat(r.PushOpenRate.String, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse push_open_rate for user %s: %w", r.UserID, err)
-			}
-		}
-
-		var completionRate float64
-		if r.CompletionRate.Valid {
-			completionRate, err = strconv.ParseFloat(r.CompletionRate.String, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse completion_rate for user %s: %w", r.UserID, err)
-			}
-		}
-
-		var reliabilityScore float64
-		if r.ReliabilityScore.Valid {
-			reliabilityScore, err = strconv.ParseFloat(r.ReliabilityScore.String, 64)
-			if err != nil {
-				return nil, fmt.Errorf("parse reliability_score for user %s: %w", r.UserID, err)
-			}
-		}
-
-		var medianResponseSec int
-		if r.MedianResponseSeconds.Valid {
-			medianResponseSec = int(r.MedianResponseSeconds.Int32)
-		}
-
-		var totalCompleted int
-		if r.TotalTasksCompleted.Valid {
-			totalCompleted = int(r.TotalTasksCompleted.Int32)
-		}
-
-		result = append(result, matching.CandidateInput{
-			UserID:                r.UserID,
-			ExperienceLevel:       r.ExperienceLevel,
-			ExperienceMultiplier:  em,
-			MAB:                   mab,
-			RadiusKM:              int(r.RadiusKm),
-			FixedLat:              lat,
-			FixedLng:              lng,
-			Skills:                skills,
-			AcceptanceRate:        acceptanceRate,
-			MedianResponseSeconds: medianResponseSec,
-			PushOpenRate:          pushOpenRate,
-			CompletionRate:        completionRate,
-			ReliabilityScore:      reliabilityScore,
-			TotalTasksCompleted:   totalCompleted,
-		})
+// toRegularCandidate converts a GetEligibleCandidatesRow to a CandidateInput.
+func toRegularCandidate(ctx context.Context, q *db.Queries, r db.GetEligibleCandidatesRow) (matching.CandidateInput, error) {
+	skills, err := q.GetUserSkills(ctx, r.UserID)
+	if err != nil {
+		return matching.CandidateInput{}, fmt.Errorf("get skills for user %s: %w", r.UserID, err)
 	}
-	return result, nil
+
+	em, _ := strconv.ParseFloat(r.ExperienceMultiplier, 64)
+	mab, _ := strconv.ParseFloat(r.Mab, 64)
+
+	c := matching.CandidateInput{
+		UserID:               r.UserID,
+		ExperienceLevel:      r.ExperienceLevel,
+		ExperienceMultiplier: em,
+		MAB:                  mab,
+		RadiusKM:             int(r.RadiusKm),
+		Skills:               skills,
+		IsNewUser:            false,
+	}
+
+	if r.FixedLat.Valid {
+		v, _ := strconv.ParseFloat(r.FixedLat.String, 64)
+		c.FixedLat = &v
+	}
+	if r.FixedLng.Valid {
+		v, _ := strconv.ParseFloat(r.FixedLng.String, 64)
+		c.FixedLng = &v
+	}
+	if r.AcceptanceRate.Valid {
+		c.AcceptanceRate, _ = strconv.ParseFloat(r.AcceptanceRate.String, 64)
+	}
+	if r.PushOpenRate.Valid {
+		c.PushOpenRate, _ = strconv.ParseFloat(r.PushOpenRate.String, 64)
+	}
+	if r.CompletionRate.Valid {
+		c.CompletionRate, _ = strconv.ParseFloat(r.CompletionRate.String, 64)
+	}
+	if r.ReliabilityScore.Valid {
+		c.ReliabilityScore, _ = strconv.ParseFloat(r.ReliabilityScore.String, 64)
+	}
+	if r.MedianResponseSeconds.Valid {
+		c.MedianResponseSeconds = int(r.MedianResponseSeconds.Int32)
+	}
+	if r.TotalTasksCompleted.Valid {
+		c.TotalTasksCompleted = int(r.TotalTasksCompleted.Int32)
+	}
+
+	return c, nil
+}
+
+// toNewUserCandidate converts a GetNewUserCandidatesRow to a CandidateInput
+// with IsNewUser=true so the scoring engine applies the behavior-intent floor.
+func toNewUserCandidate(ctx context.Context, q *db.Queries, r db.GetNewUserCandidatesRow) (matching.CandidateInput, error) {
+	skills, err := q.GetUserSkills(ctx, r.UserID)
+	if err != nil {
+		return matching.CandidateInput{}, fmt.Errorf("get skills for user %s: %w", r.UserID, err)
+	}
+
+	em, _ := strconv.ParseFloat(r.ExperienceMultiplier, 64)
+	mab, _ := strconv.ParseFloat(r.Mab, 64)
+
+	c := matching.CandidateInput{
+		UserID:               r.UserID,
+		ExperienceLevel:      r.ExperienceLevel,
+		ExperienceMultiplier: em,
+		MAB:                  mab,
+		RadiusKM:             int(r.RadiusKm),
+		Skills:               skills,
+		IsNewUser:            true,
+	}
+
+	if r.FixedLat.Valid {
+		v, _ := strconv.ParseFloat(r.FixedLat.String, 64)
+		c.FixedLat = &v
+	}
+	if r.FixedLng.Valid {
+		v, _ := strconv.ParseFloat(r.FixedLng.String, 64)
+		c.FixedLng = &v
+	}
+	if r.AcceptanceRate.Valid {
+		c.AcceptanceRate, _ = strconv.ParseFloat(r.AcceptanceRate.String, 64)
+	}
+	if r.PushOpenRate.Valid {
+		c.PushOpenRate, _ = strconv.ParseFloat(r.PushOpenRate.String, 64)
+	}
+	if r.CompletionRate.Valid {
+		c.CompletionRate, _ = strconv.ParseFloat(r.CompletionRate.String, 64)
+	}
+	if r.ReliabilityScore.Valid {
+		c.ReliabilityScore, _ = strconv.ParseFloat(r.ReliabilityScore.String, 64)
+	}
+	if r.MedianResponseSeconds.Valid {
+		c.MedianResponseSeconds = int(r.MedianResponseSeconds.Int32)
+	}
+	if r.TotalTasksCompleted.Valid {
+		c.TotalTasksCompleted = int(r.TotalTasksCompleted.Int32)
+	}
+
+	return c, nil
 }

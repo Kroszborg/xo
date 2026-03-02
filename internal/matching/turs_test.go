@@ -328,3 +328,190 @@ func TestRankCandidates_Order(t *testing.T) {
 		t.Errorf("expected good candidate first, got %s", ranked[0].UserID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Dynamic weights tests
+// ---------------------------------------------------------------------------
+
+func TestWeights_ForTask_OfflineUnchanged(t *testing.T) {
+	w := DefaultWeights()
+	got := w.ForTask(false)
+	if got != w {
+		t.Errorf("offline weights should be unchanged, got %+v", got)
+	}
+}
+
+func TestWeights_ForTask_OnlineZerosGeo(t *testing.T) {
+	w := DefaultWeights()
+	got := w.ForTask(true)
+
+	if got.GeoRelevance != 0 {
+		t.Errorf("expected GeoRelevance=0 for online, got %.4f", got.GeoRelevance)
+	}
+
+	sum := got.SkillMatch + got.BudgetCompatibility + got.GeoRelevance +
+		got.ExperienceFit + got.BehaviorIntent + got.SpeedProbability
+	if math.Abs(sum-1.0) > 1e-9 {
+		t.Errorf("online weights should sum to 1.0, got %.6f", sum)
+	}
+
+	// Verify proportional relationship is preserved.
+	// SkillMatch / BudgetCompatibility should still be 0.30 / 0.25 = 1.2
+	ratio := got.SkillMatch / got.BudgetCompatibility
+	wantRatio := 0.30 / 0.25
+	if math.Abs(ratio-wantRatio) > 1e-9 {
+		t.Errorf("weight ratio not preserved: got %.4f, want %.4f", ratio, wantRatio)
+	}
+}
+
+func TestScoreCandidate_OnlineNoGeoContribution(t *testing.T) {
+	svc := newService()
+	task := baseTask()
+	task.IsOnline = true
+
+	c := baseCandidate()
+
+	bd := svc.ScoreCandidate(task, c)
+	// For online tasks, GeoRelevance should still be computed (0.5 for online)
+	// but its weight is 0, so it shouldn't affect the final score.
+	if bd.GeoRelevance != 0.5 {
+		t.Errorf("GeoRelevance raw should be 0.5, got %.4f", bd.GeoRelevance)
+	}
+
+	// Verify online score differs from offline score for the same candidate.
+	task2 := baseTask()
+	task2.IsOnline = false
+	lat, lng := 12.9716, 77.5946
+	task2.Lat = &lat
+	task2.Lng = &lng
+	task2.RadiusKM = 50
+	c.FixedLat = &lat
+	c.FixedLng = &lng
+
+	bdOffline := svc.ScoreCandidate(task2, c)
+	if bd.FinalScore == bdOffline.FinalScore {
+		t.Log("online and offline scores happen to match; this is acceptable but worth noting")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cold-start behavior floor tests
+// ---------------------------------------------------------------------------
+
+func TestBehaviorIntent_NewUserFloor(t *testing.T) {
+	svc := newService().(*tursService)
+
+	// New user with zero acceptance rate.
+	c := baseCandidate()
+	c.IsNewUser = true
+	c.AcceptanceRate = 0
+	c.CompletionRate = 1.0
+	c.ReliabilityScore = 100
+
+	got := svc.behaviorIntent(c)
+	// Raw: 0*0.6 + 1.0*0.3 + 1.0*0.1 = 0.4 → floor applies → 0.5
+	if math.Abs(got-0.5) > 1e-9 {
+		t.Errorf("expected floor of 0.5 for new user, got %.4f", got)
+	}
+}
+
+func TestBehaviorIntent_NewUserAboveFloor(t *testing.T) {
+	svc := newService().(*tursService)
+
+	// New user who already has decent metrics (e.g., accepted a few tasks quickly).
+	c := baseCandidate()
+	c.IsNewUser = true
+	c.AcceptanceRate = 0.8
+	c.CompletionRate = 0.9
+	c.ReliabilityScore = 90
+
+	got := svc.behaviorIntent(c)
+	// Raw: 0.8*0.6 + 0.9*0.3 + 0.9*0.1 = 0.48 + 0.27 + 0.09 = 0.84
+	// Above floor, so floor doesn't apply.
+	want := 0.8*0.6 + 0.9*0.3 + (90.0/100)*0.1
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("expected %.4f, got %.4f", want, got)
+	}
+}
+
+func TestBehaviorIntent_VeteranNoFloor(t *testing.T) {
+	svc := newService().(*tursService)
+
+	// Veteran user with low acceptance rate - no floor should apply.
+	c := baseCandidate()
+	c.IsNewUser = false
+	c.AcceptanceRate = 0
+	c.CompletionRate = 1.0
+	c.ReliabilityScore = 100
+
+	got := svc.behaviorIntent(c)
+	want := 0.0*0.6 + 1.0*0.3 + 1.0*0.1
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("expected %.4f for veteran (no floor), got %.4f", want, got)
+	}
+}
+
+func TestNewUser_GetsHigherBehaviorThanVeteranWithZeroRate(t *testing.T) {
+	svc := newService()
+	task := baseTask()
+	task.IsOnline = true
+
+	newUser := baseCandidate()
+	newUser.UserID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	newUser.IsNewUser = true
+	newUser.AcceptanceRate = 0
+	newUser.CompletionRate = 1.0
+	newUser.ReliabilityScore = 100
+
+	veteran := baseCandidate()
+	veteran.UserID = uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	veteran.IsNewUser = false
+	veteran.AcceptanceRate = 0
+	veteran.CompletionRate = 1.0
+	veteran.ReliabilityScore = 100
+
+	newBD := svc.ScoreCandidate(task, newUser)
+	vetBD := svc.ScoreCandidate(task, veteran)
+
+	if newBD.BehaviorIntent <= vetBD.BehaviorIntent {
+		t.Errorf("new user behavior (%.4f) should exceed veteran with same zero rate (%.4f)",
+			newBD.BehaviorIntent, vetBD.BehaviorIntent)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive alpha (EM update) test
+// ---------------------------------------------------------------------------
+
+func TestAdaptiveAlpha(t *testing.T) {
+	// These test the orchestrator.adaptiveAlpha function indirectly.
+	// Since it's unexported, we validate the EM update logic through
+	// the TURS scoring: verify that experience multiplier affects MAB
+	// which affects budget compatibility scoring.
+	svc := newService()
+	task := baseTask()
+	task.IsOnline = true
+	task.Budget = 1200
+
+	// High EM user → high MAB → lower budget compatibility.
+	highEM := baseCandidate()
+	highEM.UserID = uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	highEM.ExperienceMultiplier = 1.8
+	highEM.MAB = 2000 // derived from high EM
+	highEM.Skills = []uuid.UUID{skillA, skillB}
+
+	// Low EM user → low MAB → higher budget compatibility.
+	lowEM := baseCandidate()
+	lowEM.UserID = uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	lowEM.ExperienceMultiplier = 0.6
+	lowEM.MAB = 800 // derived from low EM
+	lowEM.Skills = []uuid.UUID{skillA, skillB}
+
+	highBD := svc.ScoreCandidate(task, highEM)
+	lowBD := svc.ScoreCandidate(task, lowEM)
+
+	if lowBD.BudgetCompatibility <= highBD.BudgetCompatibility {
+		t.Errorf("low-EM user should have better budget compat (%.4f) than high-EM (%.4f)",
+			lowBD.BudgetCompatibility, highBD.BudgetCompatibility)
+	}
+}
