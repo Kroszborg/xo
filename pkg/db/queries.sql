@@ -194,7 +194,7 @@ WHERE task_id = $1;
 -- ============================================================
 
 -- $1 = task_budget (numeric)
--- $2 = skill_ids ([]uuid passed via pq.Array)
+-- $2 = task_id (uuid)
 
 -- name: GetEligibleCandidates :many
 SELECT
@@ -221,8 +221,8 @@ WHERE
     AND EXISTS (
         SELECT 1
         FROM user_skills us
+        JOIN task_required_skills trs ON trs.skill_id = us.skill_id AND trs.task_id = $2
         WHERE us.user_id = u.id
-        AND us.skill_id = ANY($2)
     );
 
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	db "xo/pkg/db/db"
 
@@ -112,14 +113,9 @@ func (o *Orchestrator) runPriorityFlow(parent context.Context, taskID uuid.UUID)
 		return
 	}
 
-	var firstSkillID uuid.UUID
-	if len(skillIDs) > 0 {
-		firstSkillID = skillIDs[0]
-	}
-
 	rows, err := o.q.GetEligibleCandidates(ctx, db.GetEligibleCandidatesParams{
-		Mab:     task.Budget,
-		SkillID: firstSkillID,
+		Mab:    task.Budget,
+		TaskID: taskID,
 	})
 	if err != nil {
 		fmt.Printf("[orchestrator] failed to fetch candidates for task %s: %v\n", taskID, err)
@@ -168,7 +164,7 @@ func (o *Orchestrator) runPriorityFlow(parent context.Context, taskID uuid.UUID)
 
 		err = o.q.InsertTaskNotificationsBulk(ctx, db.InsertTaskNotificationsBulkParams{
 			TaskID:     uuid.NullUUID{UUID: taskID, Valid: true},
-			Unnest:     userIDs,
+			Unnest:     pq.Array(userIDs),
 			WaveNumber: sql.NullInt32{Int32: int32(waveNum), Valid: true},
 		})
 		if err != nil {
