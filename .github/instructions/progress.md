@@ -26,5 +26,20 @@
 - [x] Dependencies: golang.org/x/oauth2 added to go.mod
 - [x] Tests: 29/29 passing (24 matching + 5 notification)
 
+## Gateway Implementation (Completed)
+- [x] Phase 0: Scaffold — gateway/ directory, Dockerfile, requirements.txt, schema.sql (17 tables)
+- [x] Phase 1: DB layer — config.py (Pydantic Settings), database.py (asyncpg pool), envelope.py, deps.py
+- [x] Phase 2: Auth — register, login, send-otp (stub), verify-otp, refresh, logout endpoints
+- [x] Phase 3: Middleware — CORS, GZip, RequestID, validation error handler, catch-all error handler
+- [x] Phase 4: Profile & Onboarding — GET/PATCH profile, avatar upload, 7-step onboarding endpoints
+- [x] Phase 5: Verification & Payments — verification status, ID document upload, payment method CRUD
+- [x] Phase 6: Location/Uploads/Config — PUT/GET location, address CRUD, categories, FAQs
+- [x] Phase 7: xo Proxy — httpx.AsyncClient forwarding tasks/devices to xo with page→offset translation
+- [x] Phase 8: Dashboard — aggregated stats (onboarding, tasks_as_giver, tasks_as_doer, behavior, verification)
+- [x] Phase 9: Tests — 29/29 gateway tests passing (auth, profile, onboarding, dashboard, location, verification, payments, config, envelope, health)
+- [x] docker-compose.yml updated with gateway service (port 8000) + gateway_uploads volume + schema mount
+- [x] xo Go tests: still 29/29 passing, build/vet clean
+
 ## Pending
 - None
+
