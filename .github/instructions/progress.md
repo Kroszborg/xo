@@ -36,9 +36,11 @@
 - [x] Phase 6: Location/Uploads/Config — PUT/GET location, address CRUD, categories, FAQs
 - [x] Phase 7: xo Proxy — httpx.AsyncClient forwarding tasks/devices to xo with page→offset translation
 - [x] Phase 8: Dashboard — aggregated stats (onboarding, tasks_as_giver, tasks_as_doer, behavior, verification)
-- [x] Phase 9: Tests — 29/29 gateway tests passing (auth, profile, onboarding, dashboard, location, verification, payments, config, envelope, health)
+- [x] Phase 9: Tests — 67/67 gateway tests passing (auth, profile, onboarding, dashboard, location, verification, payments, config, envelope, health, tasks proxy, edge cases)
 - [x] docker-compose.yml updated with gateway service (port 8000) + gateway_uploads volume + schema mount
 - [x] xo Go tests: still 29/29 passing, build/vet clean
+- [x] Docker compose build: both xo and gateway images build successfully
+- [x] Docker compose up: full stack integration verified (registration, login, profile, tasks proxy all working)
 
 ## Pending
 - None

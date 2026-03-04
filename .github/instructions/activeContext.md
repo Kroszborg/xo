@@ -1,7 +1,7 @@
 # Active Context
 
 ## Current Work
-API Gateway (Python FastAPI) fully implemented. All endpoints built and tested.
+API Gateway (Python FastAPI) fully implemented and tested. Docker compose integration verified.
 
 ## Key Decisions
 - Go 1.25 net/http ServeMux for xo routing (no third-party router)
@@ -54,7 +54,7 @@ API Gateway (Python FastAPI) fully implemented. All endpoints built and tested.
 - gateway/app/routers/config.py — categories + FAQs
 - gateway/app/routers/tasks.py — xo proxy (task CRUD + devices)
 - gateway/app/routers/dashboard.py — aggregated user stats
-- gateway/tests/ — 29 tests (conftest, auth, profile, endpoints, envelope, health)
+- gateway/tests/ — 67 tests (conftest, auth, profile, endpoints, envelope, health, tasks_proxy, edge_cases)
 
 ### Infrastructure
 - docker-compose.yml — postgres + xo + gateway services
