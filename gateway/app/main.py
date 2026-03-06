@@ -1,6 +1,8 @@
 """FastAPI application entry point for the API Gateway."""
 
 from contextlib import asynccontextmanager
+import logging
+import sys
 import uuid
 
 from fastapi import FastAPI, Request, status
@@ -14,21 +16,42 @@ from app.config import settings
 from app.database import close_pool, init_pool
 from app.schemas.envelope import err
 
+# Configure logging to show INFO level
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+logger = logging.getLogger("gateway")
+
 
 # ─── Lifespan: DB pool ───────────────────────────────────────────────────────
 
+def print_routes(app: FastAPI) -> None:
+    """Print all registered routes on startup."""
+    logger.info("[gateway] Registered endpoints:")
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "methods") and hasattr(route, "path"):
+            for method in route.methods:
+                if method != "HEAD":  # Skip implicit HEAD methods
+                    routes.append((method, route.path))
+    # Sort by path, then method
+    routes.sort(key=lambda x: (x[1], x[0]))
+    for method, path in routes:
+        logger.info(f"  {method:<7} {path}")
+    sys.stdout.flush()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: create DB pool. Shutdown: close DB pool."""
+    """Startup: create DB pool, print routes. Shutdown: close DB pool."""
     pool = await init_pool(
         settings.database_url,
         min_size=settings.db_min_pool_size,
         max_size=settings.db_max_pool_size,
     )
-    print(f"[gateway] DB pool created (min={settings.db_min_pool_size}, max={settings.db_max_pool_size})")
+    logger.info(f"[gateway] DB pool created (min={settings.db_min_pool_size}, max={settings.db_max_pool_size})")
+    print_routes(app)
     yield
     await close_pool()
-    print("[gateway] DB pool closed")
+    logger.info("[gateway] DB pool closed")
 
 
 app = FastAPI(

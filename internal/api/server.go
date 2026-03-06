@@ -40,21 +40,32 @@ func (s *Server) routes() {
 	h := &taskHandler{db: s.db, q: s.q, orch: s.orch}
 	d := &deviceHandler{q: s.q}
 
-	s.mux.HandleFunc("GET /health", handleHealth)
+	// Define all routes with their methods
+	routes := []struct {
+		method  string
+		path    string
+		handler http.HandlerFunc
+	}{
+		{"GET", "/health", handleHealth},
+		{"POST", "/api/v1/tasks", h.create},
+		{"GET", "/api/v1/tasks", h.list},
+		{"GET", "/api/v1/tasks/{id}", h.get},
+		{"PUT", "/api/v1/tasks/{id}", h.update},
+		{"DELETE", "/api/v1/tasks/{id}", h.remove},
+		{"POST", "/api/v1/tasks/{id}/accept", h.accept},
+		{"POST", "/api/v1/tasks/{id}/complete", h.complete},
+		{"PUT", "/api/v1/devices", d.register},
+		{"DELETE", "/api/v1/devices", d.remove},
+		{"GET", "/api/v1/devices/{user_id}", d.list},
+	}
 
-	// Task CRUD + lifecycle.
-	s.mux.HandleFunc("POST /api/v1/tasks", h.create)
-	s.mux.HandleFunc("GET /api/v1/tasks", h.list)
-	s.mux.HandleFunc("GET /api/v1/tasks/{id}", h.get)
-	s.mux.HandleFunc("PUT /api/v1/tasks/{id}", h.update)
-	s.mux.HandleFunc("DELETE /api/v1/tasks/{id}", h.remove)
-	s.mux.HandleFunc("POST /api/v1/tasks/{id}/accept", h.accept)
-	s.mux.HandleFunc("POST /api/v1/tasks/{id}/complete", h.complete)
-
-	// Device token management (FCM).
-	s.mux.HandleFunc("PUT /api/v1/devices", d.register)
-	s.mux.HandleFunc("DELETE /api/v1/devices", d.remove)
-	s.mux.HandleFunc("GET /api/v1/devices/{user_id}", d.list)
+	// Register routes and print them
+	log.Println("[xo] Registered endpoints:")
+	for _, r := range routes {
+		pattern := r.method + " " + r.path
+		s.mux.HandleFunc(pattern, r.handler)
+		log.Printf("  %-7s %s", r.method, r.path)
+	}
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
