@@ -13,82 +13,74 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"xo/internal/api"
-	"xo/internal/matching"
-	"xo/internal/notification"
-	"xo/internal/orchestrator"
-	db "xo/pkg/db/db"
+	"github.com/hakaitech/xo/internal/api"
 )
 
 func main() {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/xo?sslmode=disable"
+	cfg := api.Config{
+		DatabaseURL:        envOrDefault("DATABASE_URL", "postgres://xo:xo@localhost:5432/xo?sslmode=disable"),
+		OllamaURL:          envOrDefault("OLLAMA_URL", "http://localhost:11434"),
+		GatewayInternalURL: envOrDefault("GATEWAY_INTERNAL_URL", "http://localhost:8000"),
+		Port:               envOrDefault("PORT", "8080"),
 	}
 
-	addr := os.Getenv("LISTEN_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-
-	sqlDB, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		log.Fatalf("failed to open database: %v", err)
 	}
-	defer sqlDB.Close()
+	defer db.Close()
 
-	if err = sqlDB.Ping(); err != nil {
-		log.Fatalf("ping db: %v", err)
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		log.Fatalf("failed to ping database: %v", err)
 	}
+	log.Println("database connection established")
 
-	// Notification setup: prioritize FCM, then webhook, then log.
-	var notifier notification.Notifier
-	fcmProjectID := os.Getenv("FCM_PROJECT_ID")
-	if fcmProjectID != "" {
-		q := db.New(sqlDB)
-		fcm, err := notification.NewFCMNotifier(context.Background(), fcmProjectID, q)
-		if err != nil {
-			log.Fatalf("init fcm notifier: %v", err)
-		}
-		notifier = fcm
-		log.Printf("notifications: FCM (project=%s)", fcmProjectID)
-	} else if webhookURL := os.Getenv("NOTIFICATION_WEBHOOK_URL"); webhookURL != "" {
-		notifier = notification.NewWebhookNotifier(webhookURL)
-		log.Printf("notifications: webhook → %s", webhookURL)
-	} else {
-		notifier = notification.LogNotifier{}
-		log.Println("notifications: log (set FCM_PROJECT_ID for push, NOTIFICATION_WEBHOOK_URL for webhook)")
-	}
+	srv := api.NewServer(db, cfg)
 
-	turs := matching.NewTURSService(matching.DefaultWeights())
-	orch := orchestrator.New(sqlDB, turs, notifier)
-
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      api.RecoveryMiddleware(api.LoggingMiddleware(api.NewServer(sqlDB, orch))),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+	httpServer := &http.Server{
+		Addr:         fmt.Sprintf(":%s", cfg.Port),
+		Handler:      srv.Router(),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start server in a goroutine.
+	errCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("xo: listening on %s\n", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
-		}
+		log.Printf("xo service listening on :%s", cfg.Port)
+		errCh <- httpServer.ListenAndServe()
 	}()
 
-	// Wait for interrupt signal and shut down gracefully.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
 
-	fmt.Println("xo: shutting down")
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("shutdown: %v", err)
+	select {
+	case sig := <-quit:
+		log.Printf("received signal %v, shutting down", sig)
+	case err := <-errCh:
+		log.Printf("server error: %v", err)
 	}
-	fmt.Println("xo: stopped")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("server forced to shutdown: %v", err)
+	}
+
+	log.Println("xo service stopped")
+}
+
+func envOrDefault(key, fallback string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return fallback
 }

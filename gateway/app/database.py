@@ -1,30 +1,38 @@
-"""Async database connection pool using asyncpg."""
-
 import asyncpg
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
+from app.config import settings
 
 _pool: asyncpg.Pool | None = None
 
 
-def _normalize_dsn(dsn: str) -> str:
-    """Convert postgres:// to postgresql:// for asyncpg compatibility."""
-    if dsn.startswith("postgres://"):
-        return "postgresql://" + dsn[len("postgres://"):]
-    return dsn
+def _dsn() -> str:
+    """Return an asyncpg-compatible DSN.
+
+    The config value may use the ``postgresql://`` scheme (common in
+    application configs) or the ``postgres://`` scheme (used by Docker
+    Compose).  ``asyncpg`` only accepts ``postgresql://``, so we normalise
+    here.
+    """
+    url = settings.database_url
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return url
 
 
-async def init_pool(dsn: str, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
-    """Create the global connection pool."""
+async def init_pool() -> None:
+    """Create the connection pool.  Call once at application startup."""
     global _pool
     _pool = await asyncpg.create_pool(
-        _normalize_dsn(dsn),
-        min_size=min_size,
-        max_size=max_size,
+        dsn=_dsn(),
+        min_size=2,
+        max_size=10,
     )
-    return _pool
 
 
 async def close_pool() -> None:
-    """Close the global connection pool."""
+    """Gracefully close the connection pool.  Call at shutdown."""
     global _pool
     if _pool is not None:
         await _pool.close()
@@ -32,7 +40,18 @@ async def close_pool() -> None:
 
 
 def get_pool() -> asyncpg.Pool:
-    """Return the current pool. Raises if not initialized."""
+    """Return the current pool, raising if not yet initialised."""
     if _pool is None:
-        raise RuntimeError("Database pool not initialized. Call init_pool() first.")
+        raise RuntimeError("Database pool is not initialised")
     return _pool
+
+
+@asynccontextmanager
+async def get_db() -> AsyncIterator[asyncpg.Connection]:
+    """Async context manager that acquires a connection from the pool."""
+    pool = get_pool()
+    conn: asyncpg.Connection = await pool.acquire()
+    try:
+        yield conn
+    finally:
+        await pool.release(conn)

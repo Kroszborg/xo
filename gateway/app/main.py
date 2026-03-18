@@ -1,135 +1,94 @@
-"""FastAPI application entry point for the API Gateway."""
-
 from contextlib import asynccontextmanager
-import logging
-import sys
-import uuid
 
-from fastapi import FastAPI, Request, status
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.database import close_pool, init_pool
 from app.schemas.envelope import err
 
-# Configure logging to show INFO level
-logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-logger = logging.getLogger("gateway")
 
-
-# ─── Lifespan: DB pool ───────────────────────────────────────────────────────
-
-def print_routes(app: FastAPI) -> None:
-    """Print all registered routes on startup."""
-    logger.info("[gateway] Registered endpoints:")
-    routes = []
-    for route in app.routes:
-        if hasattr(route, "methods") and hasattr(route, "path"):
-            for method in route.methods:
-                if method != "HEAD":  # Skip implicit HEAD methods
-                    routes.append((method, route.path))
-    # Sort by path, then method
-    routes.sort(key=lambda x: (x[1], x[0]))
-    for method, path in routes:
-        logger.info(f"  {method:<7} {path}")
-    sys.stdout.flush()
-
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: create DB pool, print routes. Shutdown: close DB pool."""
-    pool = await init_pool(
-        settings.database_url,
-        min_size=settings.db_min_pool_size,
-        max_size=settings.db_max_pool_size,
-    )
-    logger.info(f"[gateway] DB pool created (min={settings.db_min_pool_size}, max={settings.db_max_pool_size})")
-    print_routes(app)
+    await init_pool()
     yield
     await close_pool()
-    logger.info("[gateway] DB pool closed")
 
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="xo API Gateway",
+    title="XO Gateway",
     version="0.1.0",
     lifespan=lifespan,
 )
 
-
-# ─── Middleware ───────────────────────────────────────────────────────────────
-
 # CORS
+origins = [o.strip() for o in settings.cors_origins.split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# GZip
-app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# ---------------------------------------------------------------------------
+# Error handlers
+# ---------------------------------------------------------------------------
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    """Attach a unique request ID to every request/response."""
-
-    async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-
-app.add_middleware(RequestIDMiddleware)
-
-
-# ─── Exception handlers ──────────────────────────────────────────────────────
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Return validation errors in the standard envelope."""
-    details = []
-    for e in exc.errors():
-        loc = " -> ".join(str(l) for l in e["loc"])
-        details.append(f"{loc}: {e['msg']}")
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Normalise HTTPException responses into the envelope format."""
+    detail = exc.detail
+    # If detail is already an envelope dict, pass it through
+    if isinstance(detail, dict) and ("error" in detail or "data" in detail):
+        return JSONResponse(status_code=exc.status_code, content=detail)
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content=err(error="validation_error", message="; ".join(details)),
+        status_code=exc.status_code,
+        content=err("HTTP_ERROR", str(detail)),
     )
 
 
 @app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """Catch-all: wrap unexpected errors in the envelope."""
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Catch-all for unhandled exceptions."""
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=err(error="internal_error", message=str(exc)),
+        content=err("INTERNAL_ERROR", "An unexpected error occurred"),
     )
 
 
-# ─── Routers ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Routers
+# ---------------------------------------------------------------------------
 
-from app.routers import auth, config, dashboard, location, profile, tasks, verification  # noqa: E402
+from app.routers import auth, categories, chat, nearby, notifications, oauth, onboarding, profile, reviews, tasks  # noqa: E402
 
 app.include_router(auth.router)
+app.include_router(oauth.router)
 app.include_router(profile.router)
-app.include_router(verification.router)
-app.include_router(location.router)
-app.include_router(config.router)
 app.include_router(tasks.router)
-app.include_router(dashboard.router)
+app.include_router(categories.router)
+app.include_router(notifications.router)
+app.include_router(chat.router)
+app.include_router(reviews.router)
+app.include_router(nearby.router)
+app.include_router(onboarding.router)
 
 
-# ─── Health check ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
 
-@app.get("/healthz", tags=["health"])
-async def healthz():
-    """Health check endpoint."""
-    return {"status": "ok", "service": "gateway"}
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

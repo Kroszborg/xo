@@ -1,67 +1,84 @@
-"""FastAPI dependencies: DB connection, current user, etc."""
-
-from __future__ import annotations
-
-from typing import Annotated
+from typing import AsyncIterator
 
 import asyncpg
 import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, Header, HTTPException, Request, status
 
-from app.auth import decode_access_token
 from app.database import get_pool
 
-security = HTTPBearer(auto_error=False)
+# ---------------------------------------------------------------------------
+# Database dependency
+# ---------------------------------------------------------------------------
+
+ALLOWED_CLIENT_TYPES = {"web", "mobile_android", "mobile_ios"}
 
 
-async def get_db() -> asyncpg.Connection:
-    """Yield a connection from the pool."""
+async def get_db_conn() -> AsyncIterator[asyncpg.Connection]:
+    """Yield an asyncpg connection, released automatically after the request."""
     pool = get_pool()
-    async with pool.acquire() as conn:
-        yield conn
-
-
-async def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
-    conn: Annotated[asyncpg.Connection, Depends(get_db)],
-) -> dict:
-    """Extract and validate the current user from the Authorization header."""
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing authorization header",
-        )
+    conn: asyncpg.Connection = await pool.acquire()
     try:
-        payload = decode_access_token(credentials.credentials)
-    except jwt.PyJWTError as e:
+        yield conn
+    finally:
+        await pool.release(conn)
+
+
+# ---------------------------------------------------------------------------
+# Auth dependency
+# ---------------------------------------------------------------------------
+
+
+async def get_current_user(request: Request) -> dict:
+    """Extract and validate the JWT from the Authorization header.
+
+    Returns a dict with ``id`` and ``role`` keys.
+    """
+    auth_header: str | None = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {e}",
+            detail="Missing or invalid Authorization header",
         )
 
-    user_id = payload.get("sub")
-    if not user_id:
+    token = auth_header.removeprefix("Bearer ").strip()
+
+    try:
+        from app.auth import decode_token
+
+        payload = decode_token(token)
+    except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token missing subject",
+            detail="Token has expired",
         )
-
-    user = await conn.fetchrow("SELECT id, email, phone, role, status FROM users WHERE id = $1", user_id)
-    if user is None:
+    except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
+            detail="Invalid token",
         )
-    if user["status"] != "active":
+
+    if payload.get("type") != "access":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is not active",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
         )
 
-    return dict(user)
+    return {"id": payload["sub"], "role": payload.get("role", "")}
 
 
-# Type alias for convenience
-CurrentUser = Annotated[dict, Depends(get_current_user)]
-DBConn = Annotated[asyncpg.Connection, Depends(get_db)]
+# ---------------------------------------------------------------------------
+# Client-type dependency
+# ---------------------------------------------------------------------------
+
+
+async def get_client_type(
+    x_client_type: str = Header(default="web", alias="X-Client-Type"),
+) -> str:
+    """Read the ``X-Client-Type`` header and validate it."""
+    value = x_client_type.lower()
+    if value not in ALLOWED_CLIENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid client type. Allowed: {', '.join(sorted(ALLOWED_CLIENT_TYPES))}",
+        )
+    return value

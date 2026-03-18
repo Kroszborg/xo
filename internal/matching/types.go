@@ -1,55 +1,50 @@
 package matching
 
-import (
-	"time"
+import "github.com/google/uuid"
 
-	"github.com/google/uuid"
-)
-
+// TaskInput contains the task parameters needed for scoring.
 type TaskInput struct {
-	ID              uuid.UUID
-	Budget          float64
-	CategoryID      uuid.UUID
-	RequiredSkills  []uuid.UUID
-	IsOnline        bool
-	Lat             *float64
-	Lng             *float64
-	RadiusKM        int
-	DurationHours   int
-	ComplexityLevel string
-	CreatedAt       time.Time
+	ID               uuid.UUID
+	RequiredSkillIDs []uuid.UUID
+	MinProficiency   []int // parallel to RequiredSkillIDs
+	Budget           float64
+	Latitude         float64
+	Longitude        float64
+	IsOnline         bool
+	Urgency          string // low, normal, high, critical
 }
 
+// CandidateInput contains a candidate's data for scoring.
 type CandidateInput struct {
-	UserID               uuid.UUID
-	ExperienceLevel      string
-	ExperienceMultiplier float64
-	MAB                  float64
-	RadiusKM             int
-	FixedLat             *float64
-	FixedLng             *float64
-
-	Skills []uuid.UUID
-
-	AcceptanceRate        float64
-	MedianResponseSeconds int
-	PushOpenRate          float64
-	CompletionRate        float64
-	ReliabilityScore      float64
-	TotalTasksCompleted   int
-
-	// IsNewUser flags candidates with fewer than the cold-start threshold
-	// of completed tasks. The scoring engine applies a behavior-intent
-	// floor for these users to counteract zero-data penalties.
-	IsNewUser bool
+	UserID              uuid.UUID
+	SkillIDs            []uuid.UUID
+	ProficiencyLevels   []int // parallel to SkillIDs
+	Latitude            float64
+	Longitude           float64
+	MaxDistanceKM       int
+	PreferredBudgetMin  float64
+	PreferredBudgetMax  float64
+	TotalTasksCompleted int
+	TotalTasksAccepted  int
+	TotalTasksNotified  int
+	AvgResponseMinutes  float64
+	CompletionRate      float64
+	AcceptanceRate      float64
+	ReliabilityScore    float64
+	AvgReviewScore      float64
+	ConsistencyScore    float64
 }
 
+// ScoreBreakdown provides per-dimension scores for transparency.
 type ScoreBreakdown struct {
-	SkillMatch          float64
-	BudgetCompatibility float64
-	GeoRelevance        float64
-	ExperienceFit       float64
-	BehaviorIntent      float64
-	SpeedProbability    float64
-	FinalScore          float64
+	UserID           uuid.UUID `json:"user_id"`
+	TotalScore       float64   `json:"total_score"`
+	SkillMatch       float64   `json:"skill_match"`
+	BudgetCompat     float64   `json:"budget_compat"`
+	GeoRelevance     float64   `json:"geo_relevance"`
+	ExperienceFit    float64   `json:"experience_fit"`
+	BehaviorIntent   float64   `json:"behavior_intent"`
+	SpeedProbability float64   `json:"speed_probability"`
+	WarmupFactor     float64   `json:"warmup_factor"`
+	WarmupBoost      float64   `json:"warmup_boost"`
 }
