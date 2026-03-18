@@ -1,0 +1,37 @@
+# Go binaries
+/xo
+cmd/xo/xo
+*.exe
+
+# Python
+gateway/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache/
+gateway/.pytest_cache/
+*.egg-info/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Firebase / secrets
+firebase-service-account.json
+*.json.key
+
+# AI assistant instructions
+.github/
+.claude/
+instructions/
