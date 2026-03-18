@@ -1,0 +1,33 @@
+# Production overrides — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Create a .env file from .env.example before running.
+
+services:
+  postgres:
+    restart: unless-stopped
+    ports: []   # not exposed publicly — internal only
+
+  ollama:
+    restart: unless-stopped
+    ports: []   # not exposed publicly — internal only
+
+  xo:
+    restart: unless-stopped
+    ports: []   # not exposed publicly — gateway proxies it
+    environment:
+      DATABASE_URL: "postgres://xo:xo@postgres:5432/xo?sslmode=disable"
+      OLLAMA_URL: "http://ollama:11434"
+      GATEWAY_INTERNAL_URL: "http://gateway:8000"
+      PORT: "8080"
+
+  gateway:
+    restart: unless-stopped
+    ports:
+      - "8000:8000"   # only this is public
+    environment:
+      DATABASE_URL: "postgresql://xo:xo@postgres:5432/xo"
+      XO_SERVICE_URL: "http://xo:8080"
+      JWT_SECRET: "${JWT_SECRET}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      PORT: "8000"
