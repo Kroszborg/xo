@@ -1,6 +1,14 @@
 -- Gateway schema: tables owned by the API gateway.
 -- Loaded AFTER xo's 01-schema.sql and 02-seed.sql so the users table exists.
--- Reuses xo's update_updated_at_column() trigger function.
+
+-- xo defines trigger_set_updated_at(); create the alias name used by gateway triggers.
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ─── Refresh Tokens ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS refresh_tokens (

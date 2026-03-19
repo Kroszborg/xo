@@ -49,12 +49,11 @@ async def register(body: RegisterRequest, conn: DBConn):
 
     row = await conn.fetchrow(
         """
-        INSERT INTO users (email, phone, password_hash, role, status)
-        VALUES ($1, $2, $3, $4, 'active')
+        INSERT INTO users (email, password_hash, role)
+        VALUES ($1, $2, $3)
         RETURNING id, email, role, created_at
         """,
         body.email,
-        body.phone,
         password_hash,
         db_role,
     )
@@ -67,12 +66,9 @@ async def register(body: RegisterRequest, conn: DBConn):
 
     # Create xo user_profiles stub so xo queries don't break
     await conn.execute(
-        """
-        INSERT INTO user_profiles (user_id, experience_level, experience_multiplier, mab, radius_km)
-        VALUES ($1, 'beginner', 1.00, 0.00, 10)
-        ON CONFLICT DO NOTHING
-        """,
+        "INSERT INTO user_profiles (user_id, phone) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         row["id"],
+        body.phone,
     )
 
     # Create user behavior metrics stub
@@ -112,12 +108,12 @@ async def register(body: RegisterRequest, conn: DBConn):
 async def login(body: LoginRequest, conn: DBConn):
     """Authenticate with email + password."""
     row = await conn.fetchrow(
-        "SELECT id, email, password_hash, role, status FROM users WHERE email = $1",
+        "SELECT id, email, password_hash, role, is_active FROM users WHERE email = $1",
         body.email,
     )
     if row is None:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if row["status"] != "active":
+    if not row["is_active"]:
         raise HTTPException(status_code=403, detail="Account is not active")
 
     try:
@@ -156,7 +152,7 @@ async def refresh(body: RefreshRequest, conn: DBConn):
     token_hash = hash_refresh_token(body.refresh_token)
     row = await conn.fetchrow(
         """
-        SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked, u.role, u.status
+        SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked, u.role, u.is_active
         FROM refresh_tokens rt
         JOIN users u ON u.id = rt.user_id
         WHERE rt.token_hash = $1
@@ -169,7 +165,7 @@ async def refresh(body: RefreshRequest, conn: DBConn):
         raise HTTPException(status_code=401, detail="Refresh token revoked")
     if row["expires_at"].replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Refresh token expired")
-    if row["status"] != "active":
+    if not row["is_active"]:
         raise HTTPException(status_code=403, detail="Account is not active")
 
     # Revoke old token

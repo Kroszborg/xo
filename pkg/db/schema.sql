@@ -15,7 +15,7 @@ CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT,  -- nullable for OAuth-only users
-    role TEXT NOT NULL CHECK (role IN ('task_giver','task_doer','admin')),
+    role TEXT NOT NULL CHECK (role IN ('task_giver','task_doer','admin','both')),
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
