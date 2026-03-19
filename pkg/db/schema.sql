@@ -127,11 +127,12 @@ CREATE TABLE tasks (
     budget NUMERIC(12,2) NOT NULL,
     latitude NUMERIC(10,7),
     longitude NUMERIC(10,7),
+    radius NUMERIC(10,2) DEFAULT 50.0,
     city TEXT,
     location_name TEXT,
     is_online BOOLEAN DEFAULT FALSE,
     urgency TEXT DEFAULT 'normal' CHECK (urgency IN ('low','normal','high','critical')),
-    status TEXT DEFAULT 'pending' CHECK (status IN ('pending','matching','matched','in_progress','completed','cancelled','expired')),
+    status TEXT DEFAULT 'pending' CHECK (status IN ('pending','matching','matched','active','in_progress','completed','cancelled','expired')),
     client_type TEXT DEFAULT 'web' CHECK (client_type IN ('web','mobile_android','mobile_ios')),
     category_id UUID REFERENCES task_categories(id),
     slm_category_id UUID REFERENCES task_categories(id),
@@ -353,6 +354,81 @@ CREATE TABLE user_languages (
 );
 CREATE TRIGGER set_user_languages_updated_at BEFORE UPDATE ON user_languages FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
+-- User preference signals (behavioral patterns from accept/reject history)
+CREATE TABLE user_preference_signals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    category_id UUID REFERENCES task_categories(id) ON DELETE CASCADE,
+    signal_type TEXT NOT NULL CHECK (signal_type IN (
+        'category_affinity',
+        'budget_accept_avg', 'budget_accept_count',
+        'budget_reject_avg', 'budget_reject_count',
+        'geo_avg_distance_accepted',
+        'ignore_count'
+    )),
+    signal_value NUMERIC(10,4) NOT NULL,
+    sample_size INT NOT NULL DEFAULT 0,
+    last_updated TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (user_id, category_id, signal_type)
+);
+CREATE INDEX idx_preference_signals_user ON user_preference_signals(user_id);
+CREATE INDEX idx_preference_signals_user_category ON user_preference_signals(user_id, category_id);
+
+-- Relevancy scores (materialized for online tasks)
+CREATE TABLE relevancy_scores (
+    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_fit NUMERIC(6,4) NOT NULL,
+    acceptance_likelihood NUMERIC(6,4) NOT NULL,
+    cold_start_multiplier NUMERIC(4,2) NOT NULL DEFAULT 1.0,
+    final_score NUMERIC(8,4) NOT NULL,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (task_id, user_id)
+);
+CREATE INDEX idx_relevancy_task_score ON relevancy_scores(task_id, final_score DESC);
+CREATE INDEX idx_relevancy_user_score ON relevancy_scores(user_id, final_score DESC);
+CREATE INDEX idx_relevancy_task ON relevancy_scores(task_id);
+
+-- Matching queue (persistent queue for offline orchestration)
+CREATE TABLE matching_queue (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id),
+    score NUMERIC(8,4) NOT NULL,
+    task_fit NUMERIC(6,4) NOT NULL,
+    acceptance_likelihood NUMERIC(6,4) NOT NULL,
+    status TEXT DEFAULT 'queued' CHECK (status IN (
+        'queued', 'active', 'notified', 'accepted',
+        'declined', 'ignored', 'cancelled', 'filtered'
+    )),
+    position INT NOT NULL,
+    notified_at TIMESTAMPTZ,
+    responded_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(task_id, user_id)
+);
+CREATE INDEX idx_matching_queue_task_status ON matching_queue(task_id, status, position);
+CREATE INDEX idx_matching_queue_task_active ON matching_queue(task_id) WHERE status IN ('queued', 'active', 'notified');
+
+-- Giver behavior metrics (task giver reputation)
+CREATE TABLE giver_behavior_metrics (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    total_tasks_posted INT DEFAULT 0,
+    total_tasks_completed INT DEFAULT 0,
+    total_tasks_cancelled INT DEFAULT 0,
+    total_tasks_expired INT DEFAULT 0,
+    avg_review_from_doers NUMERIC(3,2) DEFAULT 0,
+    total_reviews_from_doers INT DEFAULT 0,
+    repost_count INT DEFAULT 0,
+    last_repost_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TRIGGER set_giver_behavior_metrics_updated_at
+    BEFORE UPDATE ON giver_behavior_metrics
+    FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
+
 -- Indexes for performance
 CREATE INDEX idx_tasks_status ON tasks(status);
 CREATE INDEX idx_tasks_created_by ON tasks(created_by);
@@ -380,3 +456,7 @@ CREATE INDEX idx_user_education_user ON user_education(user_id);
 CREATE INDEX idx_user_certificates_user ON user_certificates(user_id);
 CREATE INDEX idx_user_languages_user ON user_languages(user_id);
 CREATE INDEX idx_user_profiles_location ON user_profiles(latitude, longitude) WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+CREATE INDEX idx_relevancy_scores_cleanup ON relevancy_scores(task_id);
+CREATE INDEX idx_matching_queue_task ON matching_queue(task_id);
+CREATE INDEX idx_giver_behavior_metrics_user ON giver_behavior_metrics(user_id);
+CREATE INDEX idx_user_preference_signals_lookup ON user_preference_signals(user_id, category_id, signal_type);

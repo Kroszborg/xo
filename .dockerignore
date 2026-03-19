@@ -1,5 +1,15 @@
-.git
-.github
-.claude
-*.md
-gateway/
+# Build artifacts
+/xo
+
+# Go test cache
+*.test
+*.out
+
+# Editor / OS artefacts
+.DS_Store
+*.swp
+
+# Gateway virtual environment
+gateway/.venv/
+gateway/__pycache__/
+gateway/.pytest_cache/

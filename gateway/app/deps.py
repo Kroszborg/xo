@@ -1,84 +1,67 @@
-from typing import AsyncIterator
+"""FastAPI dependencies: DB connection, current user, etc."""
+
+from __future__ import annotations
+
+from typing import Annotated
 
 import asyncpg
 import jwt
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.auth import decode_access_token
 from app.database import get_pool
 
-# ---------------------------------------------------------------------------
-# Database dependency
-# ---------------------------------------------------------------------------
-
-ALLOWED_CLIENT_TYPES = {"web", "mobile_android", "mobile_ios"}
+security = HTTPBearer(auto_error=False)
 
 
-async def get_db_conn() -> AsyncIterator[asyncpg.Connection]:
-    """Yield an asyncpg connection, released automatically after the request."""
+async def get_db() -> asyncpg.Connection:
+    """Yield a connection from the pool."""
     pool = get_pool()
-    conn: asyncpg.Connection = await pool.acquire()
-    try:
+    async with pool.acquire() as conn:
         yield conn
-    finally:
-        await pool.release(conn)
 
 
-# ---------------------------------------------------------------------------
-# Auth dependency
-# ---------------------------------------------------------------------------
-
-
-async def get_current_user(request: Request) -> dict:
-    """Extract and validate the JWT from the Authorization header.
-
-    Returns a dict with ``id`` and ``role`` keys.
-    """
-    auth_header: str | None = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    conn: Annotated[asyncpg.Connection, Depends(get_db)],
+) -> dict:
+    """Extract and validate the current user from the Authorization header."""
+    if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
+            detail="Missing authorization header",
         )
-
-    token = auth_header.removeprefix("Bearer ").strip()
-
     try:
-        from app.auth import decode_token
-
-        payload = decode_token(token)
-    except jwt.ExpiredSignatureError:
+        payload = decode_access_token(credentials.credentials)
+    except jwt.PyJWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
+            detail=f"Invalid token: {e}",
         )
-    except jwt.PyJWTError:
+
+    user_id = payload.get("sub")
+    if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
+            detail="Token missing subject",
         )
 
-    if payload.get("type") != "access":
+    user = await conn.fetchrow("SELECT id, email, phone, role, status FROM users WHERE id = $1", user_id)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
+            detail="User not found",
         )
-
-    return {"id": payload["sub"], "role": payload.get("role", "")}
-
-
-# ---------------------------------------------------------------------------
-# Client-type dependency
-# ---------------------------------------------------------------------------
-
-
-async def get_client_type(
-    x_client_type: str = Header(default="web", alias="X-Client-Type"),
-) -> str:
-    """Read the ``X-Client-Type`` header and validate it."""
-    value = x_client_type.lower()
-    if value not in ALLOWED_CLIENT_TYPES:
+    if user["status"] != "active":
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid client type. Allowed: {', '.join(sorted(ALLOWED_CLIENT_TYPES))}",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is not active",
         )
-    return value
+
+    return dict(user)
+
+
+# Type alias for convenience
+CurrentUser = Annotated[dict, Depends(get_current_user)]
+DBConn = Annotated[asyncpg.Connection, Depends(get_db)]

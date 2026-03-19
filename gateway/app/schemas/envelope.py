@@ -1,19 +1,44 @@
-from typing import Any, Optional
+"""Standard API response envelope."""
+
+from __future__ import annotations
+
+from typing import Any, Generic, TypeVar
+
+from pydantic import BaseModel
+
+T = TypeVar("T")
 
 
-def ok(data: Any) -> dict:
-    return {"data": data}
+class Envelope(BaseModel, Generic[T]):
+    """Uniform JSON envelope for all API responses."""
+
+    success: bool = True
+    data: T | None = None
+    error: str | None = None
+    message: str | None = None
 
 
-def err(code: str, message: str, details: list | None = None) -> dict:
-    error = {"code": code, "message": message}
-    if details:
-        error["details"] = details
-    return {"error": error}
+class PaginatedData(BaseModel, Generic[T]):
+    """Wrapper for paginated list responses."""
+
+    items: list[T]
+    total: int
+    page: int
+    limit: int
+    pages: int
 
 
-def cursor_page(items: list, next_cursor: str | None, has_more: bool) -> dict:
-    return {
-        "data": items,
-        "cursor": {"next": next_cursor, "has_more": has_more},
-    }
+def ok(data: Any = None, message: str | None = None) -> dict:
+    """Return a success envelope dict."""
+    return {"success": True, "data": data, "error": None, "message": message}
+
+
+def err(error: str, message: str | None = None) -> dict:
+    """Return an error envelope dict."""
+    return {"success": False, "data": None, "error": error, "message": message}
+
+
+def paginated(items: list, total: int, page: int, limit: int) -> dict:
+    """Return a paginated success envelope dict."""
+    pages = (total + limit - 1) // limit if limit > 0 else 0
+    return ok(data={"items": items, "total": total, "page": page, "limit": limit, "pages": pages})

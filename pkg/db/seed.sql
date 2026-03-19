@@ -175,6 +175,37 @@ INSERT INTO user_behavior_metrics (
 
 
 -- ============================================================
+-- 6b. GIVER BEHAVIOR METRICS (task_givers)
+-- ============================================================
+
+-- Alice: 3 tasks posted (tasks 1, 3, 5), 1 completed, 0 cancelled, 0 expired
+INSERT INTO giver_behavior_metrics (
+    user_id, total_tasks_posted, total_tasks_completed,
+    total_tasks_cancelled, total_tasks_expired,
+    avg_review_from_doers, total_reviews_from_doers,
+    repost_count
+) VALUES (
+    'cccccccc-cccc-cccc-cccc-cccccccccc01',
+    3, 1, 0, 0,
+    0, 0,
+    0
+) ON CONFLICT (user_id) DO NOTHING;
+
+-- Bob: 2 tasks posted (tasks 2, 4), 0 completed, 0 cancelled, 0 expired
+INSERT INTO giver_behavior_metrics (
+    user_id, total_tasks_posted, total_tasks_completed,
+    total_tasks_cancelled, total_tasks_expired,
+    avg_review_from_doers, total_reviews_from_doers,
+    repost_count
+) VALUES (
+    'cccccccc-cccc-cccc-cccc-cccccccccc02',
+    2, 0, 0, 0,
+    0, 0,
+    0
+) ON CONFLICT (user_id) DO NOTHING;
+
+
+-- ============================================================
 -- 7. SAMPLE TASKS (5)
 -- ============================================================
 

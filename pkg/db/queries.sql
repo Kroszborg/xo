@@ -98,9 +98,9 @@ SELECT * FROM task_categories WHERE id = $1;
 
 -- name: CreateTask :one
 INSERT INTO tasks (
-    created_by, title, description, budget, latitude, longitude, city,
+    created_by, title, description, budget, latitude, longitude, radius, city,
     is_online, urgency, client_type, category_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING *;
 
 -- name: GetTaskByID :one
@@ -358,3 +358,156 @@ RETURNING *;
 
 -- name: GetUserAuthProviders :many
 SELECT * FROM user_auth_providers WHERE user_id = $1;
+
+-- =====================
+-- User Preference Signals
+-- =====================
+
+-- name: GetPreferenceSignals :many
+SELECT * FROM user_preference_signals
+WHERE user_id = $1 AND category_id = $2;
+
+-- name: UpsertPreferenceSignal :one
+INSERT INTO user_preference_signals (user_id, category_id, signal_type, signal_value, sample_size)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (user_id, category_id, signal_type) DO UPDATE
+SET signal_value = $4,
+    sample_size = $5,
+    last_updated = NOW()
+RETURNING *;
+
+-- =====================
+-- Giver Behavior Metrics
+-- =====================
+
+-- name: GetGiverBehaviorMetrics :one
+SELECT * FROM giver_behavior_metrics WHERE user_id = $1;
+
+-- name: CreateGiverBehaviorMetrics :one
+INSERT INTO giver_behavior_metrics (user_id) VALUES ($1)
+RETURNING *;
+
+-- name: UpdateGiverBehaviorMetrics :exec
+UPDATE giver_behavior_metrics
+SET total_tasks_posted = $2,
+    total_tasks_completed = $3,
+    total_tasks_cancelled = $4,
+    total_tasks_expired = $5,
+    avg_review_from_doers = $6,
+    total_reviews_from_doers = $7,
+    repost_count = $8,
+    last_repost_at = $9
+WHERE user_id = $1;
+
+-- =====================
+-- Matching Queue
+-- =====================
+
+-- name: InsertMatchingQueueEntry :one
+INSERT INTO matching_queue (task_id, user_id, score, task_fit, acceptance_likelihood, status, position)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (task_id, user_id) DO NOTHING
+RETURNING *;
+
+-- name: UpdateMatchingQueueStatus :exec
+UPDATE matching_queue
+SET status = $3,
+    notified_at = CASE WHEN $3 = 'notified' THEN NOW() ELSE notified_at END,
+    responded_at = CASE WHEN $3 IN ('accepted', 'declined', 'ignored') THEN NOW() ELSE responded_at END
+WHERE task_id = $1 AND user_id = $2;
+
+-- name: BulkUpdateMatchingQueueStatus :exec
+UPDATE matching_queue
+SET status = $3,
+    responded_at = CASE WHEN $3 IN ('accepted', 'declined', 'ignored', 'cancelled') THEN NOW() ELSE responded_at END
+WHERE task_id = $1 AND status = $2;
+
+-- name: GetMatchingQueueByTask :many
+SELECT * FROM matching_queue
+WHERE task_id = $1
+ORDER BY position;
+
+-- name: GetNextQueuedCandidate :one
+SELECT * FROM matching_queue
+WHERE task_id = $1 AND status = 'queued'
+ORDER BY position
+LIMIT 1;
+
+-- =====================
+-- Relevancy Scores
+-- =====================
+
+-- name: InsertRelevancyScore :exec
+INSERT INTO relevancy_scores (task_id, user_id, task_fit, acceptance_likelihood, cold_start_multiplier, final_score)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (task_id, user_id) DO UPDATE
+SET task_fit = $3,
+    acceptance_likelihood = $4,
+    cold_start_multiplier = $5,
+    final_score = $6,
+    computed_at = NOW();
+
+-- name: GetRelevancyScoresByTask :many
+SELECT rs.*, up.full_name, up.avatar_url, up.city
+FROM relevancy_scores rs
+JOIN user_profiles up ON up.user_id = rs.user_id
+WHERE rs.task_id = $1
+  AND (CASE WHEN @cursor::text != '' THEN rs.final_score < (
+    SELECT final_score FROM relevancy_scores WHERE task_id = $1 AND user_id = @cursor::uuid
+  ) ELSE TRUE END)
+ORDER BY rs.final_score DESC
+LIMIT @page_limit;
+
+-- name: GetRelevancyScoresByUser :many
+SELECT rs.*, t.title, t.budget, t.city, t.is_online, t.urgency
+FROM relevancy_scores rs
+JOIN tasks t ON t.id = rs.task_id
+WHERE rs.user_id = $1
+  AND t.status = 'active'
+  AND (CASE WHEN @cursor::text != '' THEN rs.final_score < (
+    SELECT final_score FROM relevancy_scores WHERE user_id = $1 AND task_id = @cursor::uuid
+  ) ELSE TRUE END)
+ORDER BY rs.final_score DESC
+LIMIT @page_limit;
+
+-- name: DeleteRelevancyScoresByTask :exec
+DELETE FROM relevancy_scores WHERE task_id = $1;
+
+-- =====================
+-- Candidates with Skills (single query, no N+1)
+-- =====================
+
+-- name: GetCandidatesWithSkills :many
+SELECT
+    u.id AS user_id,
+    up.latitude,
+    up.longitude,
+    up.preferred_budget_min,
+    up.preferred_budget_max,
+    up.max_distance_km,
+    ubm.total_tasks_completed,
+    ubm.total_tasks_accepted,
+    ubm.total_tasks_notified,
+    ubm.total_reviews_received,
+    ubm.average_response_time_minutes,
+    ubm.completion_rate,
+    ubm.acceptance_rate,
+    ubm.reliability_score,
+    ubm.average_review_score,
+    ubm.consistency_score,
+    ARRAY_AGG(us.skill_id) FILTER (WHERE us.skill_id IS NOT NULL) AS skill_ids,
+    ARRAY_AGG(us.proficiency_level) FILTER (WHERE us.skill_id IS NOT NULL) AS proficiency_levels
+FROM users u
+JOIN user_profiles up ON up.user_id = u.id
+JOIN user_behavior_metrics ubm ON ubm.user_id = u.id
+LEFT JOIN user_skills us ON us.user_id = u.id
+WHERE u.role = 'task_doer'
+  AND u.is_active = TRUE
+  AND u.id != $1
+GROUP BY u.id, up.latitude, up.longitude, up.preferred_budget_min,
+         up.preferred_budget_max, up.max_distance_km,
+         ubm.total_tasks_completed, ubm.total_tasks_accepted,
+         ubm.total_tasks_notified, ubm.total_reviews_received,
+         ubm.average_response_time_minutes, ubm.completion_rate,
+         ubm.acceptance_rate, ubm.reliability_score,
+         ubm.average_review_score, ubm.consistency_score;

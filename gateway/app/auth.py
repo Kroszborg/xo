@@ -1,70 +1,46 @@
+"""JWT token creation and verification."""
+
+from __future__ import annotations
+
 import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
 
 from app.config import settings
 
-_ph = PasswordHasher()
 
-
-# ---------------------------------------------------------------------------
-# Password helpers
-# ---------------------------------------------------------------------------
-
-def hash_password(password: str) -> str:
-    """Return an Argon2id hash of *password*."""
-    return _ph.hash(password)
-
-
-def verify_password(password: str, hashed: str) -> bool:
-    """Return ``True`` when *password* matches the stored *hashed* value."""
-    try:
-        return _ph.verify(hashed, password)
-    except VerifyMismatchError:
-        return False
-
-
-# ---------------------------------------------------------------------------
-# JWT helpers
-# ---------------------------------------------------------------------------
-
-def create_access_token(user_id: str, role: str) -> str:
-    """Issue a short-lived access token."""
-    now = datetime.now(timezone.utc)
+def create_access_token(user_id: str, role: str) -> tuple[str, int]:
+    """Create a signed JWT access token. Returns (token, expires_in_seconds)."""
+    expires_delta = timedelta(minutes=settings.jwt_access_token_minutes)
+    expire = datetime.now(timezone.utc) + expires_delta
     payload = {
         "sub": user_id,
         "role": role,
         "type": "access",
-        "iat": now,
-        "exp": now + timedelta(minutes=settings.jwt_access_token_expire_minutes),
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
     }
-    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return token, int(expires_delta.total_seconds())
 
 
-def create_refresh_token(user_id: str) -> str:
-    """Issue a long-lived refresh token."""
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": user_id,
-        "type": "refresh",
-        "iat": now,
-        "exp": now + timedelta(days=settings.jwt_refresh_token_expire_days),
-    }
-    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+def create_refresh_token() -> tuple[str, str]:
+    """Create a random refresh token. Returns (raw_token, sha256_hash)."""
+    raw = secrets.token_urlsafe(48)
+    hashed = hashlib.sha256(raw.encode()).hexdigest()
+    return raw, hashed
 
 
-def decode_token(token: str) -> dict:
-    """Decode and validate a JWT.  Raises ``jwt.PyJWTError`` on failure."""
-    return jwt.decode(
-        token,
-        settings.jwt_secret,
-        algorithms=[settings.jwt_algorithm],
-    )
+def decode_access_token(token: str) -> dict:
+    """Decode and verify a JWT access token. Raises jwt.PyJWTError on failure."""
+    payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    if payload.get("type") != "access":
+        raise jwt.InvalidTokenError("Not an access token")
+    return payload
 
 
-def hash_token(token: str) -> str:
-    """Return a SHA-256 hex digest used to store refresh tokens in the DB."""
-    return hashlib.sha256(token.encode()).hexdigest()
+def hash_refresh_token(raw: str) -> str:
+    """Hash a raw refresh token for DB lookup."""
+    return hashlib.sha256(raw.encode()).hexdigest()
