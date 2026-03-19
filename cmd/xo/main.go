@@ -13,74 +13,82 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/hakaitech/xo/internal/api"
+	"xo/internal/api"
+	"xo/internal/matching"
+	"xo/internal/notification"
+	"xo/internal/orchestrator"
+	db "xo/pkg/db/db"
 )
 
 func main() {
-	cfg := api.Config{
-		DatabaseURL:        envOrDefault("DATABASE_URL", "postgres://xo:xo@localhost:5432/xo?sslmode=disable"),
-		OllamaURL:          envOrDefault("OLLAMA_URL", "http://localhost:11434"),
-		GatewayInternalURL: envOrDefault("GATEWAY_INTERNAL_URL", "http://localhost:8000"),
-		Port:               envOrDefault("PORT", "8080"),
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://postgres:postgres@localhost:5432/xo?sslmode=disable"
 	}
 
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	addr := os.Getenv("LISTEN_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+
+	sqlDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		log.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	defer sqlDB.Close()
 
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
-		log.Fatalf("failed to ping database: %v", err)
+	if err = sqlDB.Ping(); err != nil {
+		log.Fatalf("ping db: %v", err)
 	}
-	log.Println("database connection established")
 
-	srv := api.NewServer(db, cfg)
+	// Notification setup: prioritize FCM, then webhook, then log.
+	var notifier notification.Notifier
+	fcmProjectID := os.Getenv("FCM_PROJECT_ID")
+	if fcmProjectID != "" {
+		q := db.New(sqlDB)
+		fcm, err := notification.NewFCMNotifier(context.Background(), fcmProjectID, q)
+		if err != nil {
+			log.Fatalf("init fcm notifier: %v", err)
+		}
+		notifier = fcm
+		log.Printf("notifications: FCM (project=%s)", fcmProjectID)
+	} else if webhookURL := os.Getenv("NOTIFICATION_WEBHOOK_URL"); webhookURL != "" {
+		notifier = notification.NewWebhookNotifier(webhookURL)
+		log.Printf("notifications: webhook → %s", webhookURL)
+	} else {
+		notifier = notification.LogNotifier{}
+		log.Println("notifications: log (set FCM_PROJECT_ID for push, NOTIFICATION_WEBHOOK_URL for webhook)")
+	}
 
-	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%s", cfg.Port),
-		Handler:      srv.Router(),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+	turs := matching.NewTURSService(matching.DefaultWeights())
+	orch := orchestrator.New(sqlDB, turs, notifier)
+
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      api.RecoveryMiddleware(api.LoggingMiddleware(api.NewServer(sqlDB, orch))),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
+	// Start server in a goroutine.
 	go func() {
-		log.Printf("xo service listening on :%s", cfg.Port)
-		errCh <- httpServer.ListenAndServe()
+		fmt.Printf("xo: listening on %s\n", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %v", err)
+		}
 	}()
 
+	// Wait for interrupt signal and shut down gracefully.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	select {
-	case sig := <-quit:
-		log.Printf("received signal %v, shutting down", sig)
-	case err := <-errCh:
-		log.Printf("server error: %v", err)
+	fmt.Println("xo: shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("shutdown: %v", err)
 	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
-
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("server forced to shutdown: %v", err)
-	}
-
-	log.Println("xo service stopped")
-}
-
-func envOrDefault(key, fallback string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return fallback
+	fmt.Println("xo: stopped")
 }
