@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hakaitech/xo/internal/relevancy"
+	"xo/internal/relevancy"
 )
 
 // OnlineOrchestrator handles the materialization and lifecycle of online task

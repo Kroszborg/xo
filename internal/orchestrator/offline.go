@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hakaitech/xo/internal/notification"
-	"github.com/hakaitech/xo/internal/relevancy"
+	"xo/internal/notification"
+	"xo/internal/relevancy"
 )
 
 // OfflineOrchestrator manages the active-queue matching pipeline for offline tasks.
