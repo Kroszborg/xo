@@ -167,18 +167,9 @@ func (o *OfflineOrchestrator) ProcessTask(ctx context.Context, taskID uuid.UUID)
 		return fmt.Errorf("commit notification tx for task %s: %w", taskID, err)
 	}
 
-	// Async: send FCM push to each notified candidate
+	// Async: send push notification to each notified candidate
 	for i := 0; i < batchSize; i++ {
-		if err := o.notifier.Notify(ctx, notification.Message{
-			UserID: qualifying[i].UserID,
-			Type:   "task_match",
-			Title:  "New task match!",
-			Body:   "A new task matches your skills. Tap to view.",
-			Data: map[string]string{
-				"task_id": taskID.String(),
-				"score":   fmt.Sprintf("%.2f", qualifying[i].FinalScore),
-			},
-		}); err != nil {
+		if err := o.notifier.Notify(ctx, taskID, []uuid.UUID{qualifying[i].UserID}, 1); err != nil {
 			log.Printf("offline: failed to push-notify %s for task %s: %v",
 				qualifying[i].UserID, taskID, err)
 		}
@@ -295,15 +286,7 @@ func (o *OfflineOrchestrator) HandleDecline(ctx context.Context, taskID, userID 
 
 	// Async: push-notify replacement
 	if hasReplacement {
-		if err := o.notifier.Notify(ctx, notification.Message{
-			UserID: replacementID,
-			Type:   "task_match",
-			Title:  "New task match!",
-			Body:   "A new task matches your skills. Tap to view.",
-			Data: map[string]string{
-				"task_id": taskID.String(),
-			},
-		}); err != nil {
+		if err := o.notifier.Notify(ctx, taskID, []uuid.UUID{replacementID}, 1); err != nil {
 			log.Printf("offline: failed to notify replacement %s for task %s: %v",
 				replacementID, taskID, err)
 		}
